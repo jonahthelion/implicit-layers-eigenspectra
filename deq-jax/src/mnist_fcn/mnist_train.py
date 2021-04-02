@@ -30,13 +30,14 @@ sys.path.append(os.path.dirname(os.path.realpath(__file__)) + "/../../")
 
 from src.mnist_fcn import mnist_dataset
 from src.mnist_fcn import fcn_model
-from src.modules.deq import deq
+from src.modules.deq import deq, wtie
+
+flags.DEFINE_bool('use_deq', True, 'whether use DEQ or corresponding weight-tied networks')
+flags.DEFINE_integer('max_iter', 15, 'max iteration for fixed point solving (both forward and backward)')
+flags.DEFINE_integer('feedfwd_layers', 12, 'feedforward iterations for weight tied networks')
+flags.DEFINE_integer('d_model', 128, 'model width')
 
 flags.DEFINE_integer('batch_size', 100, 'Train batch size per core')
-
-flags.DEFINE_integer('d_model', 128, 'model width')
-flags.DEFINE_integer('max_iter', 10, 'max iteration for fixed point solving (both forward and backward)')
-
 flags.DEFINE_float('learning_rate', 1e-3, 'Max learning-rate')
 flags.DEFINE_float('grad_clip_value', 0.25, 'Gradient norm clip value')
 
@@ -49,7 +50,7 @@ EVAL_EVERY = 500
 MAX_STEPS = 10 ** 5
 
 
-def build_forward_fn(d_model: int, max_iter: int):
+def build_forward_fn(d_model: int, use_deq: bool, max_iter: int, feedfwd_layers: int):
     """Create the model's forward pass."""
 
     def forward_fn(data: Mapping[str, jnp.ndarray]) -> jnp.ndarray:
@@ -74,7 +75,10 @@ def build_forward_fn(d_model: int, max_iter: int):
 
         def f(_params, _rng, _z, *args): return transformed_net.apply(_params, _rng, _z, *args)
 
-        z_star = deq(inner_params, hk.next_rng_key(), h, f, max_iter, x)
+        if use_deq:
+            z_star = deq(inner_params, hk.next_rng_key(), h, f, max_iter, x)
+        else:
+            z_star = wtie(inner_params, hk.next_rng_key(), h, f, feedfwd_layers, x)
 
         return hk.Linear(10)(z_star.squeeze(1))
 
@@ -210,7 +214,7 @@ def main(_):
     test_dataset = mnist_dataset.load("test", is_training=False, batch_size=10000)
 
     # Set up the model, loss, and updater.
-    forward_fn = build_forward_fn(FLAGS.d_model, FLAGS.max_iter)
+    forward_fn = build_forward_fn(FLAGS.d_model, FLAGS.use_deq, FLAGS.max_iter, FLAGS.feedfwd_layers)
     forward_fn = hk.transform(forward_fn)
     loss_fn = functools.partial(ce_loss_fn, forward_fn.apply)
 

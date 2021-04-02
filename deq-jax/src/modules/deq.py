@@ -28,3 +28,22 @@ def deq(params: dict, rng, z: jnp.ndarray, fun: Callable, max_iter: int, *args) 
     z_star = fun(params, rng, z_star, *args)
     z_star = rootfind_grad(g, max_iter, params, rng, z_star, *args)
     return z_star
+
+
+def wtie(params: dict, rng, z: jnp.ndarray, fun: Callable, feedfwd_layers: int, *args) -> jnp.ndarray:
+    """
+    Apply Weight Tied Network to haiku function.
+    :param params: params for haiku function
+    :param rng: rng for init and apply of haiku function
+    :param fun: func to apply in the deep equilibrium limit, f(params, rng, x, *args)
+     and only a function of JAX primatives (e.g can not be passed bool)
+    :param feedfwd_layers: number of feed forward iterations
+    :param z: initial guess for broyden method
+    :param args: all other JAX primatives which must be passed to the function
+    :return: z_star: final hidden state
+    """
+
+    for _ in range(feedfwd_layers):
+        z = fun(params, rng, z, *args)
+    z_star = z
+    return z_star

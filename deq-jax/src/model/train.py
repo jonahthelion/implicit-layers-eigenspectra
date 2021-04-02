@@ -29,10 +29,14 @@ sys.path.append(os.path.dirname(os.path.realpath(__file__)) + "/../../")
 
 from src.model import dataset
 from src.model import model
-from src.modules.deq import deq
+from src.modules.deq import deq, wtie
 
 flags.DEFINE_integer('batch_size', 16, 'Train batch size per core')
 flags.DEFINE_integer('sequence_length', 128, 'Sequence length to learn on')
+
+flags.DEFINE_bool('use_deq', True, 'whether use DEQ or corresponding weight-tied networks')
+flags.DEFINE_integer('max_iter', 15, 'max iteration for fixed point solving (both forward and backward)')
+flags.DEFINE_integer('feedfwd_layers', 12, 'feedforward iterations for weight tied networks')
 
 flags.DEFINE_integer('d_model', 256, 'model width')
 flags.DEFINE_integer('num_heads', 4, 'Number of attention heads')
@@ -51,7 +55,8 @@ MAX_STEPS = 10 ** 6
 
 
 def build_forward_fn(vocab_size: int, d_model: int, num_heads: int,
-                     num_layers: int, dropout_rate: float, max_iter: int):
+                     num_layers: int, dropout_rate: float,
+                     use_deq:bool, max_iter: int, feedfwd_layers: int):
     """Create the model's forward pass."""
 
     def forward_fn(data: Mapping[str, jnp.ndarray],
@@ -84,7 +89,12 @@ def build_forward_fn(vocab_size: int, d_model: int, num_heads: int,
             transformed_net.init)(hk.next_rng_key(), h, x, input_mask, is_training)
 
         def f(_params, _rng, _z, *args): return transformed_net.apply(_params, _rng, _z, *args, is_training=is_training)
-        z_star = deq(inner_params, hk.next_rng_key(), h, f, max_iter, x, input_mask)
+
+        if use_deq:
+            z_star = deq(inner_params, hk.next_rng_key(), h, f, max_iter, x, input_mask)
+        else:
+            z_star = wtie(inner_params, hk.next_rng_key(), h, f, feedfwd_layers, x, input_mask)
+
 
         # Reverse the embeddings (untied).
         return hk.Linear(vocab_size)(z_star)
@@ -215,7 +225,8 @@ def main(_):
                                              FLAGS.sequence_length)
     # Set up the model, loss, and updater.
     forward_fn = build_forward_fn(vocab_size, FLAGS.d_model, FLAGS.num_heads,
-                                  FLAGS.num_layers, FLAGS.dropout_rate)
+                                  FLAGS.num_layers, FLAGS.dropout_rate, FLAGS.use_deq, FLAGS.max_iter, FLAGS.feedfwd_layers)
+
     forward_fn = hk.transform(forward_fn)
     loss_fn = functools.partial(lm_loss_fn, forward_fn.apply, vocab_size)
 
