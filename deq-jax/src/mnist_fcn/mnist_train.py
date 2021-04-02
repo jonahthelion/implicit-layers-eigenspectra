@@ -25,89 +25,83 @@ from absl import flags
 from absl import logging
 
 import sys
+
 sys.path.append(os.path.dirname(os.path.realpath(__file__)) + "/../../")
 
-from src.model import dataset
-from src.model import model
+from src.mnist_fcn import mnist_dataset
+from src.mnist_fcn import fcn_model
 from src.modules.deq import deq
 
-flags.DEFINE_integer('batch_size', 16, 'Train batch size per core')
-flags.DEFINE_integer('sequence_length', 128, 'Sequence length to learn on')
+flags.DEFINE_integer('batch_size', 100, 'Train batch size per core')
 
-flags.DEFINE_integer('d_model', 256, 'model width')
-flags.DEFINE_integer('num_heads', 4, 'Number of attention heads')
-flags.DEFINE_integer('num_layers', 1, 'Number of transformer layers')
-flags.DEFINE_float('dropout_rate', 0.1, 'Dropout rate')
+flags.DEFINE_integer('d_model', 128, 'model width')
+flags.DEFINE_integer('max_iter', 10, 'max iteration for fixed point solving (both forward and backward)')
 
-flags.DEFINE_float('learning_rate', 2e-4, 'Max learning-rate')
+flags.DEFINE_float('learning_rate', 1e-3, 'Max learning-rate')
 flags.DEFINE_float('grad_clip_value', 0.25, 'Gradient norm clip value')
 
-flags.DEFINE_string('checkpoint_dir', '/tmp/haiku-lm1b',
+flags.DEFINE_string('checkpoint_dir', '/tmp/haiku-mnist',
                     'Directory to store checkpoints.')
 
 FLAGS = flags.FLAGS
 LOG_EVERY = 50
-MAX_STEPS = 10 ** 6
+EVAL_EVERY = 500
+MAX_STEPS = 10 ** 5
 
 
-def build_forward_fn(vocab_size: int, d_model: int, num_heads: int,
-                     num_layers: int, dropout_rate: float, max_iter: int):
+def build_forward_fn(d_model: int, max_iter: int):
     """Create the model's forward pass."""
 
-    def forward_fn(data: Mapping[str, jnp.ndarray],
-                   is_training: bool = True) -> jnp.ndarray:
+    def forward_fn(data: Mapping[str, jnp.ndarray]) -> jnp.ndarray:
         """Forward pass."""
-        tokens = data['obs']
-        input_mask = jnp.greater(tokens, 0)
-        batch_size, seq_length = tokens.shape
+        x = data["image"].astype(jnp.float32) / 255.
+        x = hk.Flatten()(x)
+        x = jnp.expand_dims(x, axis=1)  # add dummy sequence length dimension
+        initializer = hk.initializers.VarianceScaling(1.0, "fan_avg", "truncated_normal")
 
-        # Embed the input tokens and positions.
-        embed_init = hk.initializers.TruncatedNormal(stddev=0.02)
-        token_embedding_map = hk.Embed(vocab_size, d_model, w_init=embed_init)
-        input_embeddings = token_embedding_map(tokens)
-        positional_embeddings = hk.get_parameter(
-            'pos_embs', [seq_length, d_model], init=embed_init)
-
-        x = input_embeddings + positional_embeddings
+        # injected input
+        x = hk.Linear(d_model, with_bias=True, w_init=initializer)(x)
         h = jnp.zeros_like(x)
 
-        # Create transformer block
-        transformer_block = model.UTBlock(
-            num_heads=num_heads,
-            num_layers=num_layers,
-            dropout_rate=dropout_rate)
+        # create fcn block
+        fcn_block = fcn_model.FeedForwardBlock()
 
-        transformed_net = hk.transform(transformer_block)
+        transformed_net = hk.transform(fcn_block)
 
         # lift params
         inner_params = hk.experimental.lift(
-            transformed_net.init)(hk.next_rng_key(), h, x, input_mask, is_training)
+            transformed_net.init)(hk.next_rng_key(), h, x)
 
-        def f(_params, _rng, _z, *args): return transformed_net.apply(_params, _rng, _z, *args, is_training=is_training)
-        z_star = deq(inner_params, hk.next_rng_key(), h, f, max_iter, x, input_mask)
+        def f(_params, _rng, _z, *args): return transformed_net.apply(_params, _rng, _z, *args)
 
-        # Reverse the embeddings (untied).
-        return hk.Linear(vocab_size)(z_star)
+        z_star = deq(inner_params, hk.next_rng_key(), h, f, max_iter, x)
+
+        return hk.Linear(10)(z_star.squeeze(1))
 
     return forward_fn
 
 
-def lm_loss_fn(forward_fn,
-               vocab_size: int,
+# Training loss (cross-entropy).
+def ce_loss_fn(forward_fn,
                params,
                rng,
-               data: Mapping[str, jnp.ndarray],
-               is_training: bool = True) -> jnp.ndarray:
+               data: Mapping[str, jnp.ndarray]) -> jnp.ndarray:
     """Compute the loss on data wrt params."""
-    logits = forward_fn(params, rng, data, is_training)
-    targets = jax.nn.one_hot(data['target'], vocab_size)
+    logits = forward_fn(params, rng, data)
+    targets = jax.nn.one_hot(data['label'], 10)
     assert logits.shape == targets.shape
 
-    mask = jnp.greater(data['obs'], 0)
-    loss = -jnp.sum(targets * jax.nn.log_softmax(logits), axis=-1)
-    loss = jnp.sum(loss * mask) / jnp.sum(mask)
+    loss = -jnp.sum(targets * jax.nn.log_softmax(logits))
+    loss /= targets.shape[0]
 
     return loss
+
+
+# Evaluation metric (classification accuracy).
+@functools.partial(jax.jit, static_argnums=0)
+def accuracy(forward_fn, params, rng, data: Mapping[str, jnp.ndarray]) -> jnp.ndarray:
+    predictions = forward_fn(params, rng, data)
+    return jnp.mean(jnp.argmax(predictions, axis=-1) == data["label"])
 
 
 class Updater:
@@ -211,13 +205,14 @@ class CheckpointingUpdater:
 
 def main(_):
     # Create the dataset.
-    train_dataset, vocab_size = dataset.load(FLAGS.batch_size,
-                                             FLAGS.sequence_length)
+    train_dataset = mnist_dataset.load("train", is_training=True, batch_size=FLAGS.batch_size)
+    train_dataset_eval = mnist_dataset.load("train", is_training=False, batch_size=10000)
+    test_dataset = mnist_dataset.load("test", is_training=False, batch_size=10000)
+
     # Set up the model, loss, and updater.
-    forward_fn = build_forward_fn(vocab_size, FLAGS.d_model, FLAGS.num_heads,
-                                  FLAGS.num_layers, FLAGS.dropout_rate)
+    forward_fn = build_forward_fn(FLAGS.d_model, FLAGS.max_iter)
     forward_fn = hk.transform(forward_fn)
-    loss_fn = functools.partial(lm_loss_fn, forward_fn.apply, vocab_size)
+    loss_fn = functools.partial(ce_loss_fn, forward_fn.apply)
 
     optimizer = optax.chain(
         optax.clip_by_global_norm(FLAGS.grad_clip_value),
@@ -232,6 +227,8 @@ def main(_):
     data = next(train_dataset)
     state = updater.init(rng, data)
 
+    logging.info('# of params: {}'.format(sum([p.size for p in jax.tree_leaves(state['params'])])))
+
     logging.info('Starting train loop...')
     prev_time = time.time()
     for step in range(MAX_STEPS):
@@ -242,9 +239,18 @@ def main(_):
         # cause these overheads to become more prominent.
         if step % LOG_EVERY == 0:
             steps_per_sec = LOG_EVERY / (time.time() - prev_time)
-            prev_time = time.time()
             metrics.update({'steps_per_sec': steps_per_sec})
             logging.info({k: float(v) for k, v in metrics.items()})
+
+            if step % EVAL_EVERY == 0:
+                train_accuracy = accuracy(forward_fn.apply, state['params'], state['rng'], next(train_dataset_eval))
+                test_accuracy = accuracy(forward_fn.apply, state['params'], state['rng'], next(test_dataset))
+                train_accuracy, test_accuracy = jax.device_get(
+                    (train_accuracy, test_accuracy))
+                logging.info(f"[Step {step}] Train / Test accuracy: "
+                             f"{train_accuracy:.3f} / {test_accuracy:.3f}.")
+
+            prev_time = time.time()
 
 
 if __name__ == '__main__':
