@@ -37,7 +37,7 @@ flags.DEFINE_integer('max_iter', 15, 'max iteration for fixed point solving (bot
 flags.DEFINE_integer('feedfwd_layers', 12, 'feedforward iterations for weight tied networks')
 flags.DEFINE_integer('d_model', 128, 'model width')
 
-flags.DEFINE_integer('batch_size', 100, 'Train batch size per core')
+flags.DEFINE_integer('batch_size', 128, 'Train batch size per core')
 flags.DEFINE_float('learning_rate', 1e-3, 'Max learning-rate')
 flags.DEFINE_float('grad_clip_value', 0.25, 'Gradient norm clip value')
 

@@ -11,7 +11,8 @@ class FeedForwardBlock(hk.Module):
     """A 1-layer feedforward network with input injections."""
 
     def __init__(self,
-                 activation = jax.numpy.tanh,
+                 # activation=jax.numpy.tanh,
+                 activation=jax.nn.relu,
                  name: Optional[str] = None):
         super().__init__(name=name)
         self._activation = activation
