@@ -1,3 +1,5 @@
+import os
+import sys
 import jax.numpy as jnp
 from jax import grad,hessian
 import numpy as onp
@@ -5,7 +7,9 @@ import matplotlib as mpl
 mpl.use('Agg')
 import matplotlib.pyplot as plt
 
-from spectral_density.jax import density
+# hacky but fine for now
+sys.path.append('./src/spectral-density/jax')
+import density
 
 
 def g(v, w, x):
