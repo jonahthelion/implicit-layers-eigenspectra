@@ -1,0 +1,3 @@
+[submodule "src/spectral-density"]
+	path = src/spectral_density
+	url = https://github.com/google/spectral-density.git
