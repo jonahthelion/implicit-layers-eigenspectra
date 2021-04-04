@@ -6,6 +6,9 @@ import jax.numpy as jnp
 import numpy as np
 from jax import value_and_grad, grad
 
+import sys
+import os
+sys.path.append(os.path.dirname(os.path.realpath(__file__)) + "/../")
 from src.modules.deq import deq
 
 
@@ -113,3 +116,9 @@ def test_deq_with_hk_using_rng():
                                    [ 0.6346791, -0.4629553,  1.9773146]])
 
     np.testing.assert_almost_equal(expected_weights, params_grad['lifted/linear_with_dropout/linear']['w'])
+
+
+if __name__ == '__main__':
+    test_deq_multi_variable()
+    test_deq_haiku()
+    # test_deq_with_hk_using_rng()

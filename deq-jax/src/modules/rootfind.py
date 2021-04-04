@@ -69,3 +69,50 @@ def dumb_bwd(fun, max_iter, res, grad):
 rootfind.defvjp(rootfind_fwd, dumb_bwd)
 rootfind_grad.defvjp(dumb_fwd, rootfind_bwd)
 
+
+@partial(jax.custom_jvp, nondiff_argnums=(0, 1))
+def my_rootfind(fun: Callable, max_iter: int, params: dict, rng: jnp.ndarray, x: jnp.ndarray, *args):
+    eps = 1e-6 * jnp.sqrt(x.size)
+    fun = partial(fun, params, rng)
+
+    result_info = jax.lax.stop_gradient(
+        broyden(fun, x, max_iter, eps, *args)
+    )
+    return result_info['result']
+
+
+@my_rootfind.defjvp
+def my_rootfind_jvp(fun: Callable, max_iter: int, primals, tangents):
+    params, rng, x, *args = primals
+    params_dot, rng_dot, x_dot, *args_dot = tangents
+
+    z_star = my_rootfind(fun, max_iter, params, rng, x, *args)
+
+    return z_star, x_dot
+
+
+@partial(jax.custom_jvp, nondiff_argnums=(0, 1))
+def my_rootfind_grad(fun: Callable, max_iter: int, params: dict, rng, x: jnp.ndarray, *args):
+    eps = 1e-6 * jnp.sqrt(x.size)
+    fun = partial(fun, params, rng)
+    result_info = jax.lax.stop_gradient(
+        broyden(fun, x, max_iter, eps, *args)
+    )
+    return result_info['result']
+
+
+@my_rootfind_grad.defjvp
+def my_rootfind_grad_jvp(fun: Callable, max_iter: int, primals, tangents):
+    params, rng, x, *args = primals
+    params_dot, rng_dot, x_dot, *args_dot = tangents
+
+    z_star = x
+    jac = jax.jacfwd(fun, argnums=2)(params, rng, z_star, *args)
+    b, h, l = z_star.shape
+    jac = jac.reshape(b * h * l, b * h * l)
+    M = h * l
+    jac = jnp.array([jac[i*M:(i+1)*M,i*M:(i+1)*M] for i in range(b)])  # collect block diagonals
+    jac_inv = jnp.linalg.inv(jac)
+    out_tangent = -jnp.matmul(jac_inv, x_dot.reshape(b, M, 1)).reshape(b, h, l)
+    return z_star, out_tangent
+

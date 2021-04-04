@@ -1,10 +1,10 @@
 from typing import Callable
 import jax.numpy as jnp
 
-from src.modules.rootfind import rootfind, rootfind_grad
+from src.modules.rootfind import rootfind, rootfind_grad, my_rootfind, my_rootfind_grad
 
 
-def deq(params: dict, rng, z: jnp.ndarray, fun: Callable, max_iter: int, *args) -> jnp.ndarray:
+def deq(params: dict, rng, z: jnp.ndarray, fun: Callable, max_iter: int, custom_vjp: bool, *args) -> jnp.ndarray:
     """
     Apply Deep Equilibrium Network to haiku function.
     :param params: params for haiku function
@@ -21,12 +21,18 @@ def deq(params: dict, rng, z: jnp.ndarray, fun: Callable, max_iter: int, *args) 
     def g(_params, _rng, _x, *args): return fun(_params, _rng, _x, *args) - _x
 
     # find equilibrium point
-    z_star = rootfind(g, max_iter, params, rng, z, *args)
+    if custom_vjp:
+        z_star = rootfind(g, max_iter, params, rng, z, *args)
+    else:
+        z_star = my_rootfind(g, max_iter, params, rng, z, *args)
 
     # set up correct graph for chain rule (bk pass)
     # in original implementation this is run only if in_training
     z_star = fun(params, rng, z_star, *args)
-    z_star = rootfind_grad(g, max_iter, params, rng, z_star, *args)
+    if custom_vjp:
+        z_star = rootfind_grad(g, max_iter, params, rng, z_star, *args)
+    else:
+        z_star = my_rootfind_grad(g, max_iter, params, rng, z_star, *args)
     return z_star
 
 
