@@ -177,14 +177,20 @@ class CheckpointingUpdater:
     def _checkpoint_paths(self):
         return [p for p in os.listdir(self._checkpoint_dir) if 'checkpoint_' in p]
 
-    def init(self, rng, data):
+    def init(self, rng, data, ckpt_steps=None):
         """Initialize experiment state."""
         if not os.path.exists(self._checkpoint_dir) or not self._checkpoint_paths():
             os.makedirs(self._checkpoint_dir, exist_ok=True)
             return self._inner.init(rng, data)
         else:
-            checkpoint = os.path.join(self._checkpoint_dir,
-                                      self._checkpoint_paths()[-1])
+            if ckpt_steps is not None:
+                ckpt_path = 'checkpoint_{}.pkl'.format(ckpt_steps)
+                assert ckpt_path in self._checkpoint_paths(), self._checkpoint_paths()
+                checkpoint = os.path.join(self._checkpoint_dir,
+                                          ckpt_path)
+            else:
+                checkpoint = os.path.join(self._checkpoint_dir,
+                                          self._checkpoint_paths()[-1])
             logging.info('Loading checkpoint from %s', checkpoint)
             with open(checkpoint, 'rb') as f:
                 state = pickle.load(f)
