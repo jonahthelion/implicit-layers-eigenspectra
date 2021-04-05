@@ -101,27 +101,28 @@ def implicit_eigenspectra(X, Ys, Xgt, Ygt):
         return jnp.linalg.inv(mat) @ jacfwd(impl_f, argnums=0)(theta, zz, X)
 
     def dtheta_op(f, X):
-        """assumes f(z(theta), theta) form of f
+        """assumes f(theta, z(theta)) form of f
         """
-        return lambda theta,zz: jacfwd(f, 1)(theta,zz) + jacfwd(f, 0)(theta,zz) @ dzdtheta(theta, zz, X)
+        return lambda theta,zz: jacfwd(f, 0)(theta,zz) + jacfwd(f, 1)(theta,zz) @ dzdtheta(theta, zz, X)
 
+    eigvals = []
+    spectra = []
     for Y in Ys:
         hess = hess_func(Y)
         zstar = analytic_fixed_point(X, Y)
-        predhess = dtheta_op(dtheta_op(lambda theta,zz: impl_f(theta,zz,X), X), X)(Y, zstar)
 
-        print(hess)
-        print(predhess)
+        hess = dtheta_op(dtheta_op(lambda theta,zz: loss(impl_f(theta,zz,X), Xgt, Ygt), X), X)(Y, zstar)
+        # gtgrad = hess_func(Y)
 
-        # # true eigenvalues
-        # vals,vecs = jnp.linalg.eigh(hess)
-        # eigvals.append(vals)
+        # true eigenvalues
+        vals,vecs = jnp.linalg.eigh(hess)
+        eigvals.append(vals)
 
-        # # lanczos
-        # tridiag, vecs = lanczos.lanczos_alg(lambda v: hess @ v, len(hess), order=10, rng_key=jaxrnd.PRNGKey(0))
-        # density, grids = density_lib.tridiag_to_density([tridiag], grid_len=10000, sigma_squared=1e-5)
-        # spectra.append((density, grids))
-    # return eigvals, spectra
+        # lanczos
+        tridiag, vecs = lanczos.lanczos_alg(lambda v: hess @ v, len(hess), order=10, rng_key=jaxrnd.PRNGKey(0))
+        density, grids = density_lib.tridiag_to_density([tridiag], grid_len=10000, sigma_squared=1e-5)
+        spectra.append((density, grids))
+    return eigvals, spectra
 
 
 def linear_regression(rnd_seed=60, eta=0.05):
@@ -139,11 +140,9 @@ def linear_regression(rnd_seed=60, eta=0.05):
     Yanas = analytic_trajectory(X, Y, Xgt, Ygt, T=50, eta=eta)
     Yimpls = implicit_trajectory(X, Y, Xgt, Ygt, T=50, eta=eta)
     
-    # compute ground-truth eigenspectrum
-    # implicit_eigenspectra(X, Yimpls, Xgt, Ygt)
-    # raise Exception
+    # compute eigenspectra
     eigvals,eigspectra = analytic_eigenspectra(X, Yanas, Xgt, Ygt)
-    eigvals_impl,eigspectra_impl = analytic_eigenspectra(X, Yanas, Xgt, Ygt)
+    eigvals_impl,eigspectra_impl = implicit_eigenspectra(X, Yimpls, Xgt, Ygt)
     eiglim = (min((min(eig) for eig in eigvals)) - 0.1, max((max(eig) for eig in eigvals)) + 0.1)
 
     for t,(Yana,eigval) in enumerate(zip(Yanas, eigvals)):
