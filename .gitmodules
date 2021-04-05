@@ -1,3 +1,6 @@
 [submodule "src/spectral-density"]
-	path = src/spectral-density
+	path = source/spectral-density
 	url = https://github.com/google/spectral-density.git
+[submodule "src/deq-jax"]
+	path = source/deq-jax
+	url = https://github.com/akbir/deq-jax.git

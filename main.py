@@ -1,10 +1,11 @@
 from fire import Fire
 
-import src
+import source
 
 
 if __name__ == "__main__":
     Fire({
-        'toy_model': src.explore.toy_model,
-        'check_inverse': src.explore.check_inverse,
+        'toy_model': source.explore.toy_model,
+        'check_inverse': source.explore.check_inverse,
+        'train_deq': source.train.train_deq,
     })

@@ -9,7 +9,7 @@ mpl.use('Agg')
 import matplotlib.pyplot as plt
 
 # hacky but fine for now
-sys.path.append('./src/spectral-density/jax')
+sys.path.append('./source/spectral-density/jax')
 import density as density_lib
 import lanczos
 import hessian_computation
