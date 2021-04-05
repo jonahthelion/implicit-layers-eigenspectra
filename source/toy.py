@@ -1,11 +1,12 @@
 import numpy as onp
 import jax.numpy as jnp
-from jax import grad, value_and_grad, hessian, jacfwd
+from jax import grad, value_and_grad, hessian, jacfwd, jvp, jit
 import jax.random as jaxrnd
 import sys
 import matplotlib as mpl
 mpl.use('Agg')
 import matplotlib.pyplot as plt
+from time import time
 
 # hacky but fine for now
 sys.path.append('./source/spectral-density/jax')
@@ -105,24 +106,26 @@ def implicit_eigenspectra(X, Ys, Xgt, Ygt):
         """
         return lambda theta,zz: jacfwd(f, 0)(theta,zz) + jacfwd(f, 1)(theta,zz) @ dzdtheta(theta, zz, X)
 
-    eigvals = []
     spectra = []
+    t0 = time()
     for Y in Ys:
-        hess = hess_func(Y)
         zstar = analytic_fixed_point(X, Y)
 
-        hess = dtheta_op(dtheta_op(lambda theta,zz: loss(impl_f(theta,zz,X), Xgt, Ygt), X), X)(Y, zstar)
-        # gtgrad = hess_func(Y)
-
-        # true eigenvalues
-        vals,vecs = jnp.linalg.eigh(hess)
-        eigvals.append(vals)
+        # hess = dtheta_op(, X), X)(Y, zstar)
+        # gthess = hess_func(Y)
+        # hvpimpl = lambda v: jvp(grad(lambda y: loss(analytic_fixed_point(X, y), Xgt, Ygt)), [Y], [v])[1]
+        impl_grad = dtheta_op(lambda theta,zz: loss(impl_f(theta,zz,X), Xgt, Ygt), X)
+        hvpimpl = jit(lambda v: jvp(lambda x: impl_grad(x, zstar), [Y], [v])[1] + jvp(lambda z: impl_grad(Y, z), [zstar], [dzdtheta(Y, zstar, X) @ v])[1])
+        # print(hvpgt(jnp.ones(len(Y))))
+        # print(hvpimpl(jnp.ones(len(Y))))
+        # print()
 
         # lanczos
-        tridiag, vecs = lanczos.lanczos_alg(lambda v: hess @ v, len(hess), order=10, rng_key=jaxrnd.PRNGKey(0))
+        tridiag, vecs = lanczos.lanczos_alg(hvpimpl, len(Y), order=10, rng_key=jaxrnd.PRNGKey(0))
         density, grids = density_lib.tridiag_to_density([tridiag], grid_len=10000, sigma_squared=1e-5)
         spectra.append((density, grids))
-    return eigvals, spectra
+    print('time:', time() - t0)
+    return spectra
 
 
 def linear_regression(rnd_seed=60, eta=0.05):
@@ -141,8 +144,8 @@ def linear_regression(rnd_seed=60, eta=0.05):
     Yimpls = implicit_trajectory(X, Y, Xgt, Ygt, T=50, eta=eta)
     
     # compute eigenspectra
+    eigspectra_impl = implicit_eigenspectra(X, Yimpls, Xgt, Ygt)
     eigvals,eigspectra = analytic_eigenspectra(X, Yanas, Xgt, Ygt)
-    eigvals_impl,eigspectra_impl = implicit_eigenspectra(X, Yimpls, Xgt, Ygt)
     eiglim = (min((min(eig) for eig in eigvals)) - 0.1, max((max(eig) for eig in eigvals)) + 0.1)
 
     for t,(Yana,eigval) in enumerate(zip(Yanas, eigvals)):
@@ -165,7 +168,7 @@ def linear_regression(rnd_seed=60, eta=0.05):
         plt.title('Explicit Gradient')
 
         ax = plt.subplot(gs[0, 1])
-        plt.plot(eigspectra[t][1], eigspectra[t][0], label='Lanczos', alpha=0.4)
+        plt.plot(eigspectra[t][1], eigspectra[t][0], label='Lanczos Exact', alpha=0.4)
         plt.hist(eigval, bins=jnp.linspace(eiglim[0], eiglim[1], 150), label='Exact')
         plt.xlim(eiglim)
         plt.ylim((0.0, 3.2))
@@ -187,8 +190,7 @@ def linear_regression(rnd_seed=60, eta=0.05):
         plt.title('Implicit Gradient')
 
         ax = plt.subplot(gs[1, 1])
-        plt.plot(eigspectra_impl[t][1], eigspectra_impl[t][0], label='Lanczos', alpha=0.4)
-        plt.hist(eigvals_impl[t], bins=jnp.linspace(eiglim[0], eiglim[1], 150), label='Exact')
+        plt.plot(eigspectra_impl[t][1], eigspectra_impl[t][0], label='Lanczos Implicit', alpha=0.4)
         plt.xlim(eiglim)
         plt.ylim((0.0, 3.2))
         plt.title('Implicit Eigenspectrum')
