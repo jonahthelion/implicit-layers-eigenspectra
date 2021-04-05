@@ -33,13 +33,14 @@ sys.path.append(os.path.dirname(os.path.realpath(__file__)) + "/deq-jax/")
 from src.modules.deq import deq, wtie
 
 
-def toy_model(dim=10):
+def toy_model(dim=1):
     A = np.random.randn(dim, dim) * 0.1
     B = np.random.randn(dim, dim)
     b = np.random.randn(dim)
-    c = np.random.randn(dim)
+    # c = np.random.randn(dim)
 
-    params = (A, B, b, c)
+    # params = (A, B, b, c)
+    params = (A, B, b)
 
     data = np.random.randn(dim)
 
@@ -47,7 +48,9 @@ def toy_model(dim=10):
 
 
 def analytic_fn(params, data):
-    (A, B, b, c) = params
+    # (A, B, b, c) = params
+    (A, B, b) = params
+    c = jnp.ones_like(b)
     dim, = b.shape
     z_star = jnp.linalg.solve(jnp.eye(dim) - A, B @ data + b)
     loss = c @ z_star
@@ -56,17 +59,18 @@ def analytic_fn(params, data):
 
 
 def deq_fn(params, data):
-    (A, B, b, c) = params
+    # (A, B, b, c) = params
+    (A, B, b) = params
+    c = jnp.ones_like(b)
     dim, = b.shape
-    dummy_bias = B @ data + b
 
     def layer(inner_params, rng, z):
-        A, = inner_params
+        _A, _B, _b = inner_params
         z = z.squeeze((0, 1))
-        z_update = A @ z + dummy_bias
+        z_update = _A @ z + _B @ data + _b
         return jnp.expand_dims(z_update, (0, 1))
 
-    _inner_params = (A,)
+    _inner_params = (A, B, b)
     z0 = jnp.zeros((1, 1, dim))
     z_star = deq(_inner_params, jax.random.PRNGKey(0), z0, layer, max_iter=50, custom_vjp=False)
     # z_star = wtie(_inner_params, jax.random.PRNGKey(0), z0, layer, feedfwd_layers=15)
@@ -91,14 +95,18 @@ if __name__ == '__main__':
     analytic_jac, _ = ravel_pytree(analytic_jac)
     deq_jac, _ = ravel_pytree(deq_jac)
     # np.testing.assert_almost_equal(analytic_jac, deq_jac)
-    # print(analytic_jac, deq_jac)
+    print(analytic_jac)
+    print(deq_jac)
 
 
     analytic_hes = jax.hessian(lambda p: analytic_fn(p, data))(params)
     deq_hes = jax.hessian(lambda p: deq_fn(p, data))(params)
     analytic_hes, _ = ravel_pytree(analytic_hes)
     deq_hes, _ = ravel_pytree(deq_hes)
-    # print(analytic_hes[:10])
-    # print(deq_hes[:10])
 
-    # np.testing.assert_almost_equal(analytic_hes, deq_hes)
+    dim, = analytic_hes.shape
+    sqrt_dim = int(np.sqrt(dim))
+    print(analytic_hes.reshape(sqrt_dim,sqrt_dim))
+    print(deq_hes.reshape(sqrt_dim, sqrt_dim) + deq_hes.reshape(sqrt_dim, sqrt_dim).transpose())
+
+    np.testing.assert_almost_equal(np.array(analytic_hes.reshape(sqrt_dim,sqrt_dim)), np.array(deq_hes.reshape(sqrt_dim, sqrt_dim) + deq_hes.reshape(sqrt_dim, sqrt_dim).transpose()), decimal=5)
