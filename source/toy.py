@@ -38,6 +38,10 @@ def loss(z, Xgt, Ygt):
     return jnp.power(Xgt @ z - Ygt, 4).mean()
 
 
+def impl_f(theta, zz, X):
+    return zz - jacfwd(lambda y,z: jnp.square(X @ z - y).mean(), 1)(theta, zz)
+
+
 def analytic_trajectory(X, Y, Xgt, Ygt, T, eta):
     Ys = []
     grad_fn = value_and_grad(lambda y: loss(analytic_fixed_point(X, y), Xgt, Ygt))
@@ -55,7 +59,6 @@ def implicit_trajectory(X, Y, Xgt, Ygt, T, eta):
     Ys = []
 
     # the function f(theta, z(theta)) that z(theta) is the fixed point of
-    impl_f = lambda theta,zz: zz - jacfwd(lambda y,z: jnp.square(X @ z - y).mean(), 1)(theta, zz)
     df_dtheta = jacfwd(impl_f, 0)
     df_dz = jacfwd(impl_f, 1)
     dl_dz = jacfwd(lambda l: loss(l, Xgt, Ygt))
@@ -65,7 +68,7 @@ def implicit_trajectory(X, Y, Xgt, Ygt, T, eta):
             Ys.append(Y)
         else:
             zstar = analytic_fixed_point(X, Ys[-1])
-            grady = dl_dz(zstar) @ jnp.linalg.inv(jnp.eye(len(zstar)) - df_dz(Ys[-1], zstar)) @ df_dtheta(Ys[-1], zstar)
+            grady = dl_dz(zstar) @ jnp.linalg.inv(jnp.eye(len(zstar)) - df_dz(Ys[-1], zstar, X)) @ df_dtheta(Ys[-1], zstar, X)
             Ys.append(Ys[-1] - eta*grady)
     return Ys
 
@@ -89,6 +92,38 @@ def analytic_eigenspectra(X, Ys, Xgt, Ygt):
     return eigvals, spectra
 
 
+def implicit_eigenspectra(X, Ys, Xgt, Ygt):
+    print('computing implicit hessian spectra')
+    hess_func = hessian(lambda y: loss(analytic_fixed_point(X, y), Xgt, Ygt))
+
+    def dzdtheta(theta, zz, X):
+        mat = jnp.eye(len(zz)) - jacfwd(impl_f, argnums=1)(theta, zz, X)
+        return jnp.linalg.inv(mat) @ jacfwd(impl_f, argnums=0)(theta, zz, X)
+
+    def dtheta_op(f, X):
+        """assumes f(z(theta), theta) form of f
+        """
+        return lambda theta,zz: jacfwd(f, 1)(theta,zz) + jacfwd(f, 0)(theta,zz) @ dzdtheta(theta, zz, X)
+
+    for Y in Ys:
+        hess = hess_func(Y)
+        zstar = analytic_fixed_point(X, Y)
+        predhess = dtheta_op(dtheta_op(lambda theta,zz: impl_f(theta,zz,X), X), X)(Y, zstar)
+
+        print(hess)
+        print(predhess)
+
+        # # true eigenvalues
+        # vals,vecs = jnp.linalg.eigh(hess)
+        # eigvals.append(vals)
+
+        # # lanczos
+        # tridiag, vecs = lanczos.lanczos_alg(lambda v: hess @ v, len(hess), order=10, rng_key=jaxrnd.PRNGKey(0))
+        # density, grids = density_lib.tridiag_to_density([tridiag], grid_len=10000, sigma_squared=1e-5)
+        # spectra.append((density, grids))
+    # return eigvals, spectra
+
+
 def linear_regression(rnd_seed=60, eta=0.05):
     """Optimize the data (X,Y) such that the LSQ solution
     to (X,Y+noise) fits some other data (X',Y') well.
@@ -105,8 +140,10 @@ def linear_regression(rnd_seed=60, eta=0.05):
     Yimpls = implicit_trajectory(X, Y, Xgt, Ygt, T=50, eta=eta)
     
     # compute ground-truth eigenspectrum
+    # implicit_eigenspectra(X, Yimpls, Xgt, Ygt)
+    # raise Exception
     eigvals,eigspectra = analytic_eigenspectra(X, Yanas, Xgt, Ygt)
-    eigvals_impl,eigspectra_impl = analytic_eigenspectra(X, Yimpls, Xgt, Ygt)
+    eigvals_impl,eigspectra_impl = analytic_eigenspectra(X, Yanas, Xgt, Ygt)
     eiglim = (min((min(eig) for eig in eigvals)) - 0.1, max((max(eig) for eig in eigvals)) + 0.1)
 
     for t,(Yana,eigval) in enumerate(zip(Yanas, eigvals)):

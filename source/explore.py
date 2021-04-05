@@ -51,7 +51,7 @@ def ana_dzdtheta(v, b, w):
 def dtheta_op(f, b, w):
     """assumes f(z(theta), theta) form of f
     """
-    return lambda z,v: jacfwd(f, 1)(z,v) + jacfwd(f, 0)(z,v) @ jacfwd(analytic_fixed_point)(v, b, w)
+    return lambda z,v: jacfwd(f, 1)(z,v) + jacfwd(f, 0)(z,v) @ dzdtheta(z, v, b, w)
 
 
 def toy_model(rnd_seed=80, imname='check.jpg', nparams=3):
