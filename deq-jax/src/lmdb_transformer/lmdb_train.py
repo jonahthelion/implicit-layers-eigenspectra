@@ -9,6 +9,7 @@ Note: Run with --alsologtostderr to see outputs.
 """
 
 import functools
+import itertools
 import os
 import pickle
 import time
@@ -23,46 +24,56 @@ import tensorflow.compat.v2 as tf
 from absl import app
 from absl import flags
 from absl import logging
+import copy
+import wandb
 
 import sys
+
 sys.path.append(os.path.dirname(os.path.realpath(__file__)) + "/../../")
 
-from src.model import dataset
-from src.model import model
+from src.lmdb_transformer import lmdb_dataset
+from src.lmdb_transformer import transformer_model
 from src.modules.deq import deq, wtie
 
-flags.DEFINE_integer('batch_size', 16, 'Train batch size per core')
+
+flags.DEFINE_integer('batch_size', 64, 'Train batch size per core')
 flags.DEFINE_integer('sequence_length', 128, 'Sequence length to learn on')
 
 flags.DEFINE_bool('use_deq', True, 'whether use DEQ or corresponding weight-tied networks')
-flags.DEFINE_integer('max_iter', 15, 'max iteration for fixed point solving (both forward and backward)')
-flags.DEFINE_integer('feedfwd_layers', 12, 'feedforward iterations for weight tied networks')
+flags.DEFINE_integer('max_iter', 20, 'max iteration for fixed point solving (both forward and backward)')
+flags.DEFINE_integer('feedfwd_layers', 8, 'feedforward iterations for weight tied networks')
 
-flags.DEFINE_integer('d_model', 256, 'model width')
+flags.DEFINE_integer('d_model', 128, 'model width')
 flags.DEFINE_integer('num_heads', 4, 'Number of attention heads')
 flags.DEFINE_integer('num_layers', 1, 'Number of transformer layers')
-flags.DEFINE_float('dropout_rate', 0.1, 'Dropout rate')
+flags.DEFINE_float('dropout_rate', 0.2, 'Dropout rate')
 
-flags.DEFINE_float('learning_rate', 2e-4, 'Max learning-rate')
+flags.DEFINE_float('learning_rate', 5e-4, 'Max learning-rate')
 flags.DEFINE_float('grad_clip_value', 0.25, 'Gradient norm clip value')
 
-flags.DEFINE_string('checkpoint_dir', '/tmp/haiku-lm1b',
+flags.DEFINE_string('checkpoint_dir', './ckpt/haiku-lmdb',
                     'Directory to store checkpoints.')
+flags.DEFINE_string('exp_name', 'deq',
+                    'Experiment Name.')
 
 FLAGS = flags.FLAGS
+
+
 LOG_EVERY = 50
-MAX_STEPS = 10 ** 6
+EVAL_EVERY = 500
+SAVE_EVERY = EVAL_EVERY
+MAX_STEPS = 10 * EVAL_EVERY
 
 
 def build_forward_fn(vocab_size: int, d_model: int, num_heads: int,
                      num_layers: int, dropout_rate: float,
-                     use_deq:bool, max_iter: int, feedfwd_layers: int):
+                     use_deq: bool, max_iter: int, feedfwd_layers: int):
     """Create the model's forward pass."""
 
     def forward_fn(data: Mapping[str, jnp.ndarray],
                    is_training: bool = True) -> jnp.ndarray:
         """Forward pass."""
-        tokens = data['obs']
+        tokens = data['text']
         input_mask = jnp.greater(tokens, 0)
         batch_size, seq_length = tokens.shape
 
@@ -77,7 +88,7 @@ def build_forward_fn(vocab_size: int, d_model: int, num_heads: int,
         h = jnp.zeros_like(x)
 
         # Create transformer block
-        transformer_block = model.UTBlock(
+        transformer_block = transformer_model.TranformerBlock(
             num_heads=num_heads,
             num_layers=num_layers,
             dropout_rate=dropout_rate)
@@ -88,36 +99,36 @@ def build_forward_fn(vocab_size: int, d_model: int, num_heads: int,
         inner_params = hk.experimental.lift(
             transformed_net.init)(hk.next_rng_key(), h, x, input_mask, is_training)
 
-        def f(_params, _rng, _z, *args): return transformed_net.apply(_params, _rng, _z, *args, is_training=is_training)
+        def f(_params, _rng, _z, *args):
+            return transformed_net.apply(_params, _rng, _z, *args, is_training=is_training)
 
         if use_deq:
             z_star = deq(inner_params, hk.next_rng_key(), h, f, max_iter, True, x, input_mask)
         else:
             z_star = wtie(inner_params, hk.next_rng_key(), h, f, feedfwd_layers, x, input_mask)
 
-
         # Reverse the embeddings (untied).
-        return hk.Linear(vocab_size)(z_star)
+        # return hk.Linear(1)(z_star.mean(axis=1)).squeeze(1)
+        return hk.Linear(1)(z_star[:, -1]).squeeze(1)
 
     return forward_fn
 
 
-def lm_loss_fn(forward_fn,
-               vocab_size: int,
-               params,
-               rng,
-               data: Mapping[str, jnp.ndarray],
-               is_training: bool = True) -> jnp.ndarray:
+def bcl_loss_accuracy_fn(forward_fn,
+                         params,
+                         rng,
+                         data: Mapping[str, jnp.ndarray],
+                         is_training: bool = True):
     """Compute the loss on data wrt params."""
     logits = forward_fn(params, rng, data, is_training)
-    targets = jax.nn.one_hot(data['target'], vocab_size)
-    assert logits.shape == targets.shape
+    targets = data['label']
+    assert logits.shape == targets.shape, (logits.shape, targets.shape)
 
-    mask = jnp.greater(data['obs'], 0)
-    loss = -jnp.sum(targets * jax.nn.log_softmax(logits), axis=-1)
-    loss = jnp.sum(loss * mask) / jnp.sum(mask)
+    predictions = jax.nn.sigmoid(logits) > 0.5
+    loss = -(targets * jax.nn.log_sigmoid(logits) + (1 - targets) * jax.nn.log_sigmoid(-logits)).mean()
+    accuracy = (predictions == targets).mean()
 
-    return loss
+    return loss, accuracy
 
 
 class Updater:
@@ -220,22 +231,31 @@ class CheckpointingUpdater:
 
 
 def main(_):
+    # init logger
+    wandb.init(entity='ryoungj', project="csc-2541-deq",
+               name=FLAGS.exp_name, config=FLAGS, resume=True, id="___"+FLAGS.exp_name,
+               dir=FLAGS.checkpoint_dir)
+
     # Create the dataset.
-    train_dataset, vocab_size = dataset.load(FLAGS.batch_size,
-                                             FLAGS.sequence_length)
+    train_dataset, test_dataset, vocab_size = lmdb_dataset.load(FLAGS.batch_size,
+                                                                FLAGS.sequence_length)
+
+    test_dataset = list(test_dataset)
     # Set up the model, loss, and updater.
     forward_fn = build_forward_fn(vocab_size, FLAGS.d_model, FLAGS.num_heads,
-                                  FLAGS.num_layers, FLAGS.dropout_rate, FLAGS.use_deq, FLAGS.max_iter, FLAGS.feedfwd_layers)
+                                  FLAGS.num_layers, FLAGS.dropout_rate, FLAGS.use_deq, FLAGS.max_iter,
+                                  FLAGS.feedfwd_layers)
 
     forward_fn = hk.transform(forward_fn)
-    loss_fn = functools.partial(lm_loss_fn, forward_fn.apply, vocab_size)
+    loss_fn = lambda params, rng, data: bcl_loss_accuracy_fn(forward_fn.apply,
+                                                             params, rng, data, is_training=True)[0]
 
     optimizer = optax.chain(
         optax.clip_by_global_norm(FLAGS.grad_clip_value),
         optax.adam(FLAGS.learning_rate, b1=0.9, b2=0.99))
 
     updater = Updater(forward_fn.init, loss_fn, optimizer)
-    updater = CheckpointingUpdater(updater, FLAGS.checkpoint_dir)
+    updater = CheckpointingUpdater(updater, os.path.join(FLAGS.checkpoint_dir, FLAGS.exp_name), checkpoint_every_n=SAVE_EVERY)
 
     # Initialize parameters.
     logging.info('Initializing parameters...')
@@ -243,6 +263,9 @@ def main(_):
     data = next(train_dataset)
     state = updater.init(rng, data)
 
+    logging.info('# of params: {}'.format(sum([p.size for p in jax.tree_leaves(state['params'])])))
+
+    best_test_loss = np.inf
     logging.info('Starting train loop...')
     prev_time = time.time()
     for step in range(MAX_STEPS):
@@ -251,13 +274,47 @@ def main(_):
         # We use JAX runahead to mask data preprocessing and JAX dispatch overheads.
         # Using values from state/metrics too often will block the runahead and can
         # cause these overheads to become more prominent.
+        wandb.log({"train/loss": jax.device_get(metrics['loss'])}, step=step)
         if step % LOG_EVERY == 0:
             steps_per_sec = LOG_EVERY / (time.time() - prev_time)
-            prev_time = time.time()
             metrics.update({'steps_per_sec': steps_per_sec})
             logging.info({k: float(v) for k, v in metrics.items()})
 
+            if step % EVAL_EVERY == 0:
+                test_loss = 0.0
+                test_accuracy = 0.0
+
+                batch_num = 0
+                for test_data in test_dataset:
+                    loss, accuracy = bcl_loss_accuracy_fn(forward_fn.apply,
+                                                          state['params'], rng, test_data, is_training=False)
+                    test_loss += loss
+                    test_accuracy += accuracy
+                    batch_num += 1
+
+                test_loss, test_accuracy = jax.device_get(
+                    (test_loss / batch_num, test_accuracy / batch_num))
+                logging.info(f"[Step {step}] Test loss/accuracy: "
+                             f"{test_loss:.3f} / {test_accuracy:.3f}.")
+                wandb.log({"test/loss": test_loss, "test/acc": test_accuracy}, step=step)
+
+                if test_loss < best_test_loss:
+                    best_test_loss = test_loss
+                    path = os.path.join(os.path.join(FLAGS.checkpoint_dir, FLAGS.exp_name),
+                                        'checkpoint_best.pkl'.format(step))
+                    checkpoint_state = jax.device_get(state)
+                    logging.info('Serializing experiment state to %s', path)
+                    with open(path, 'wb') as f:
+                        pickle.dump(checkpoint_state, f)
+
+
+            prev_time = time.time()
+
+    print("Training finished! Best loss: {:.3f}".format(best_test_loss))
+
 
 if __name__ == '__main__':
+    np.random.seed(1234)
+    tf.random.set_seed(1234)
     tf.enable_v2_behavior()
     app.run(main)

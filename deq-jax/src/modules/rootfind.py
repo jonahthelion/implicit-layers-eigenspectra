@@ -112,7 +112,10 @@ def my_rootfind_grad_jvp(fun: Callable, max_iter: int, primals, tangents):
     jac = jac.reshape(b * h * l, b * h * l)
     M = h * l
     jac = jnp.array([jac[i*M:(i+1)*M,i*M:(i+1)*M] for i in range(b)])  # collect block diagonals
-    jac_inv = jnp.linalg.inv(jac)
-    out_tangent = -jnp.matmul(jac_inv, x_dot.reshape(b, M, 1)).reshape(b, h, l)
+    # jac_inv = jnp.linalg.inv(jac)
+    # out_tangent = -jnp.matmul(jac_inv, x_dot.reshape(b, M, 1)).reshape(b, h, l)
+
+    jac_inv_x_dot = jnp.linalg.solve(jac, x_dot.reshape(b, M, 1))
+    out_tangent = -jac_inv_x_dot.reshape(b, h, l)
     return z_star, out_tangent
 
