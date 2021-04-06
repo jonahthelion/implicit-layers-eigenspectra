@@ -1,1 +1,1 @@
-from . import explore, train, toy
+from . import explore, train, toy, sanity_check

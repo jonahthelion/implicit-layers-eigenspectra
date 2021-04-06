@@ -10,4 +10,5 @@ if __name__ == "__main__":
         'train_deq': source.train.train_deq,
 
         'linear_regression': source.toy.linear_regression,
+        'check_deq': source.sanity_check.check_deq,
     })
