@@ -5,6 +5,7 @@ import haiku as hk
 import jax
 import jax.numpy as jnp
 import numpy as np
+from jax import lax
 
 
 class Attention(hk.Module):
@@ -101,6 +102,86 @@ class DenseBlock(hk.Module):
         return hk.Linear(hiddens, w_init=initializer)(x)
 
 
+class SNormLinear(hk.Module):
+    """Spectral Normalized Linear module."""
+
+    def __init__(
+            self,
+            output_size: int,
+            with_bias: bool = True,
+            w_init: Optional[hk.initializers.Initializer] = None,
+            b_init: Optional[hk.initializers.Initializer] = None,
+            name: Optional[str] = None,
+    ):
+        """Constructs the Linear module.
+        Args:
+          output_size: Output dimensionality.
+          with_bias: Whether to add a bias to the output.
+          w_init: Optional initializer for weights. By default, uses random values
+            from truncated normal, with stddev ``1 / sqrt(fan_in)``. See
+            https://arxiv.org/abs/1502.03167v3.
+          b_init: Optional initializer for bias. By default, zero.
+          name: Name of the module.
+        """
+        super().__init__(name=name)
+        self.input_size = None
+        self.output_size = output_size
+        self.with_bias = with_bias
+        self.w_init = w_init
+        self.b_init = b_init or jnp.zeros
+
+    def __call__(
+            self,
+            inputs: jnp.ndarray,
+            *,
+            precision: Optional[lax.Precision] = None,
+    ) -> jnp.ndarray:
+        """Computes a linear transform of the input."""
+        if not inputs.shape:
+            raise ValueError("Input must not be scalar.")
+
+        input_size = self.input_size = inputs.shape[-1]
+        output_size = self.output_size
+        dtype = inputs.dtype
+
+        w_init = self.w_init
+        if w_init is None:
+            stddev = 1. / np.sqrt(self.input_size)
+            w_init = hk.initializers.TruncatedNormal(stddev=stddev)
+        w = hk.get_parameter("w", [input_size, output_size], dtype, init=w_init)
+
+        # Spectral Normalization
+        w = hk.SpectralNorm(name="w_sn")(w)
+
+        out = jnp.dot(inputs, w, precision=precision)
+
+        if self.with_bias:
+            b = hk.get_parameter("b", [self.output_size], dtype, init=self.b_init)
+            b = jnp.broadcast_to(b, out.shape)
+            out = out + b
+
+        return out
+
+
+class SNormDenseBlock(hk.Module):
+    """A 2-layer MLP which widens then narrows the input."""
+
+    def __init__(self,
+                 init_scale: float,
+                 widening_factor: int = 4,
+                 name: Optional[str] = None):
+        super().__init__(name=name)
+        self._init_scale = init_scale
+        self._widening_factor = widening_factor
+
+    def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
+        hiddens = x.shape[-1]
+        initializer = hk.initializers.VarianceScaling(self._init_scale)
+        x = SNormLinear(self._widening_factor * hiddens, w_init=initializer)(x)
+        x = jax.nn.gelu(x)
+        return SNormLinear(hiddens, w_init=initializer)(x)
+
+
 class TranformerBlock(hk.Module):
     """A universal transformer block."""
 
@@ -154,6 +235,75 @@ class TranformerBlock(hk.Module):
         h = layer_norm(h, name='ln_f')
 
         return h
+
+
+class EqTranformerBlock(hk.Module):
+    """A universal transformer block."""
+
+    def __init__(self,
+                 num_partitions: int,
+                 num_heads: int,
+                 num_layers: int,
+                 dropout_rate: float,
+                 name: Optional[str] = None):
+
+        super().__init__(name=name)
+        self._num_partitions = num_partitions
+        self._num_heads = num_heads
+        self._num_layers = num_layers
+        assert self._num_layers == 1
+        self._dropout_rate = dropout_rate
+
+    def __call__(self,
+                 h: jnp.ndarray,
+                 input_embs: jnp.ndarray,
+                 mask: Optional[jnp.ndarray],
+                 is_training: bool) -> jnp.ndarray:
+        """Connects the transformer.
+        Args:
+          input_embs: Inputs, [B, T, H].
+          h: Hidden, [B, T, H].
+          h: Hidden, [B, T, H].
+          mask: Padding mask, [B, T].
+          is_training: Whether we're training or not.
+        Returns:
+          Array of shape [B, T, H].
+        """
+        init_scale = 2. / np.sqrt(self._num_layers)
+        dropout_rate = self._dropout_rate if is_training else 0.
+        if mask is not None:
+            mask = mask[:, None, None, :]
+
+        # input injections
+        h = h + input_embs
+
+        inputs_partitioned = jnp.split(input_embs, self._num_partitions, axis=-1)
+        ffn_inputs_partitioned = jnp.split(h, self._num_partitions, axis=-1)
+        ffn_outputs_partitioned = []
+        # TODO: this can be parallelized
+        for i in range(self._num_partitions):
+            ffn_out = DenseBlock(init_scale, name=f'h{i}_mlp')(ffn_inputs_partitioned[i])
+            # ffn_out = SNormDenseBlock(init_scale, name=f'h{i}_mlp')(ffn_inputs_partitioned[i])
+            ffn_out = hk.dropout(hk.next_rng_key(), dropout_rate, ffn_out)
+            ffn_outputs_partitioned.append(ffn_out)
+
+        outputs_partitioned = []
+        cur_output = jnp.zeros_like(ffn_outputs_partitioned[0])
+        for i in range(self._num_partitions):
+            attn_input = cur_output + inputs_partitioned[i]
+            attn_input_norm = layer_norm(attn_input, name=f'h{i}_ln_1')  # input (pre) layer norm
+            attn_output = SelfAttention(self._num_heads,
+                                        init_scale,
+                                        name=f'h{i}_attn')(attn_input_norm, mask)
+            attn_output = hk.dropout(hk.next_rng_key(), dropout_rate, attn_output)
+            attn_output = attn_output + cur_output  # residual
+            attn_output_norm = layer_norm(attn_output, name=f'h{i}_ln_2')  # output layer norm
+
+            cur_output = attn_output_norm + ffn_outputs_partitioned[i]
+            outputs_partitioned.append(cur_output)
+
+        output = jnp.concatenate(outputs_partitioned, axis=-1)
+        return output
 
 
 def layer_norm(x: jnp.ndarray, name: Optional[str] = None) -> jnp.ndarray:

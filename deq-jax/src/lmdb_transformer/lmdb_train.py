@@ -26,7 +26,7 @@ from absl import flags
 from absl import logging
 import copy
 import wandb
-
+import math
 import sys
 
 sys.path.append(os.path.dirname(os.path.realpath(__file__)) + "/../../")
@@ -42,6 +42,8 @@ flags.DEFINE_integer('sequence_length', 128, 'Sequence length to learn on')
 flags.DEFINE_bool('use_deq', True, 'whether use DEQ or corresponding weight-tied networks')
 flags.DEFINE_integer('max_iter', 20, 'max iteration for fixed point solving (both forward and backward)')
 flags.DEFINE_integer('feedfwd_layers', 8, 'feedforward iterations for weight tied networks')
+flags.DEFINE_bool('use_stable_deq', False, 'whether use stable DEQ networks')
+flags.DEFINE_integer('num_partitions', 4, 'number of partitions for stable DEQ')
 
 flags.DEFINE_integer('d_model', 128, 'model width')
 flags.DEFINE_integer('num_heads', 4, 'Number of attention heads')
@@ -67,7 +69,8 @@ MAX_STEPS = 10 * EVAL_EVERY
 
 def build_forward_fn(vocab_size: int, d_model: int, num_heads: int,
                      num_layers: int, dropout_rate: float,
-                     use_deq: bool, max_iter: int, feedfwd_layers: int):
+                     use_deq: bool, max_iter: int, feedfwd_layers: int,
+                     use_stable_deq: bool, num_partitions: int):
     """Create the model's forward pass."""
 
     def forward_fn(data: Mapping[str, jnp.ndarray],
@@ -85,15 +88,27 @@ def build_forward_fn(vocab_size: int, d_model: int, num_heads: int,
             'pos_embs', [seq_length, d_model], init=embed_init)
 
         x = input_embeddings + positional_embeddings
-        h = jnp.zeros_like(x)
 
         # Create transformer block
-        transformer_block = transformer_model.TranformerBlock(
-            num_heads=num_heads,
-            num_layers=num_layers,
-            dropout_rate=dropout_rate)
+        if use_stable_deq:
+            d_model_sub = math.ceil(d_model / np.sqrt(num_partitions) / num_heads) * num_heads
+            d_model_all = d_model_sub * num_partitions
+            x = hk.Linear(d_model_all)(x)
+            transformer_block = transformer_model.EqTranformerBlock(
+                num_partitions=num_partitions,
+                num_heads=num_heads,
+                num_layers=num_layers,
+                dropout_rate=dropout_rate)
+
+        else:
+            transformer_block = transformer_model.TranformerBlock(
+                num_heads=num_heads,
+                num_layers=num_layers,
+                dropout_rate=dropout_rate)
 
         transformed_net = hk.transform(transformer_block)
+
+        h = jnp.zeros_like(x)
 
         # lift params
         inner_params = hk.experimental.lift(
@@ -233,7 +248,7 @@ class CheckpointingUpdater:
 def main(_):
     # init logger
     wandb.init(entity='ryoungj', project="csc-2541-deq",
-               name=FLAGS.exp_name, config=FLAGS, resume=True, id="___"+FLAGS.exp_name,
+               name=FLAGS.exp_name, config=FLAGS, resume=True, id="____"+FLAGS.exp_name,
                dir=FLAGS.checkpoint_dir)
 
     # Create the dataset.
@@ -244,7 +259,7 @@ def main(_):
     # Set up the model, loss, and updater.
     forward_fn = build_forward_fn(vocab_size, FLAGS.d_model, FLAGS.num_heads,
                                   FLAGS.num_layers, FLAGS.dropout_rate, FLAGS.use_deq, FLAGS.max_iter,
-                                  FLAGS.feedfwd_layers)
+                                  FLAGS.feedfwd_layers, FLAGS.use_stable_deq, FLAGS.num_partitions)
 
     forward_fn = hk.transform(forward_fn)
     loss_fn = lambda params, rng, data: bcl_loss_accuracy_fn(forward_fn.apply,

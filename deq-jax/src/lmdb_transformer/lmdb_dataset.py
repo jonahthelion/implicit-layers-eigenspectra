@@ -43,7 +43,7 @@ def load(batch_size: int, sequence_length: int):
         return ds
 
     train_data = preprocess(train_data, batch_size)
-    test_data = preprocess(test_data, batch_size * 4, train=False)
+    test_data = preprocess(test_data, batch_size * 2, train=False)
 
     return train_data, test_data, vocab_size + 1
 
