@@ -27,8 +27,6 @@ def load(batch_size: int, sequence_length: int):
     def preprocess(ds, bs, train=True):
         if train:
             ds = ds.repeat()
-        # else:
-        #     ds = ds.take(5000)
         # Convert the dataset to constant-size int32 tensors.
         ds = ds.map(lambda text, label: (tf.cast(text, tf.int32), label))
         crop_size = sequence_length - 1
@@ -43,7 +41,7 @@ def load(batch_size: int, sequence_length: int):
         return ds
 
     train_data = preprocess(train_data, batch_size)
-    test_data = preprocess(test_data, batch_size * 2, train=False)
+    test_data = preprocess(test_data, batch_size, train=False)
 
     return train_data, test_data, vocab_size + 1
 

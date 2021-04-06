@@ -102,6 +102,102 @@ class DenseBlock(hk.Module):
         return hk.Linear(hiddens, w_init=initializer)(x)
 
 
+def _l2_normalize(x, axis=None, eps=1e-12):
+  """Normalizes along dimension `axis` using an L2 norm.
+
+  This specialized function exists for numerical stability reasons.
+
+  Args:
+    x: An input ndarray.
+    axis: Dimension along which to normalize, e.g. `1` to separately normalize
+      vectors in a batch. Passing `None` views `t` as a flattened vector when
+      calculating the norm (equivalent to Frobenius norm).
+    eps: Epsilon to avoid dividing by zero.
+
+  Returns:
+    An array of the same shape as 'x' L2-normalized along 'axis'.
+  """
+  return x * jax.lax.rsqrt((x * x).sum(axis=axis, keepdims=True) + eps)
+
+
+class MySpectralNorm(hk.Module):
+  """Normalizes an input by its first singular value.
+
+  This module uses power iteration to calculate this value based on the
+  input and an internal hidden state.
+  """
+
+  def __init__(
+      self,
+      eps: float = 1e-4,
+      n_steps: int = 1,
+      name: Optional[str] = None,
+  ):
+    """Initializes an SpectralNorm module.
+
+    Args:
+      eps: The constant used for numerical stability.
+      n_steps: How many steps of power iteration to perform to approximate the
+        singular value of the input.
+      name: The name of the module.
+    """
+    super().__init__(name=name)
+    self.eps = eps
+    self.n_steps = n_steps
+
+  def __call__(
+      self,
+      value,
+      error_on_non_matrix: bool = False,
+  ) -> jnp.ndarray:
+    """Performs Spectral Normalization and returns the new value.
+
+    Args:
+      value: The array-like object for which you would like to perform an
+        spectral normalization on.
+      error_on_non_matrix: Spectral normalization is only defined on matrices.
+        By default, this module will return scalars unchanged and flatten
+        higher-order tensors in their leading dimensions. Setting this flag to
+        True will instead throw errors in those cases.
+    Returns:
+      The input value normalized by it's first singular value.
+    Raises:
+      ValueError: If `error_on_non_matrix` is True and `value` has ndims > 2.
+    """
+    value = jnp.asarray(value)
+    value_shape = value.shape
+
+    # Handle scalars.
+    if value.ndim <= 1:
+      raise ValueError("Spectral normalization is not well defined for "
+                       "scalar or vector inputs.")
+    # Handle higher-order tensors.
+    elif value.ndim > 2:
+      if error_on_non_matrix:
+        raise ValueError(
+            f"Input is {value.ndim}D but error_on_non_matrix is True")
+      else:
+        value = jnp.reshape(value, [-1, value.shape[-1]])
+
+    u0 = hk.get_parameter("u0", [1, value.shape[-1]], value.dtype,
+                          init=hk.initializers.RandomNormal())
+
+    # Power iteration for the weight's singular value.
+    for _ in range(self.n_steps):
+      v0 = _l2_normalize(jnp.matmul(u0, value.transpose([1, 0])), eps=self.eps)
+      u0 = _l2_normalize(jnp.matmul(v0, value), eps=self.eps)
+
+    u0 = jax.lax.stop_gradient(u0)
+    v0 = jax.lax.stop_gradient(v0)
+
+    sigma = jnp.matmul(jnp.matmul(v0, value), jnp.transpose(u0))[0, 0]
+
+    value /= sigma
+    value_bar = value.reshape(value_shape)
+
+    return value_bar
+
+
 class SNormLinear(hk.Module):
     """Spectral Normalized Linear module."""
 
@@ -151,7 +247,11 @@ class SNormLinear(hk.Module):
         w = hk.get_parameter("w", [input_size, output_size], dtype, init=w_init)
 
         # Spectral Normalization
-        w = hk.SpectralNorm(name="w_sn")(w)
+        # w = MySpectralNorm(name="w_sn")(w)
+        u0 = hk.get_parameter("u0", [1, output_size], dtype, init=hk.initializers.RandomNormal())
+        sigma = hk.get_parameter("sigma", (), dtype, init=hk.initializers.RandomNormal())
+
+        w = w / jax.lax.stop_gradient(sigma)
 
         out = jnp.dot(inputs, w, precision=precision)
 
@@ -274,17 +374,16 @@ class EqTranformerBlock(hk.Module):
         if mask is not None:
             mask = mask[:, None, None, :]
 
-        # input injections
-        h = h + input_embs
-
         inputs_partitioned = jnp.split(input_embs, self._num_partitions, axis=-1)
         ffn_inputs_partitioned = jnp.split(h, self._num_partitions, axis=-1)
         ffn_outputs_partitioned = []
         # TODO: this can be parallelized
         for i in range(self._num_partitions):
-            ffn_out = DenseBlock(init_scale, name=f'h{i}_mlp')(ffn_inputs_partitioned[i])
-            # ffn_out = SNormDenseBlock(init_scale, name=f'h{i}_mlp')(ffn_inputs_partitioned[i])
-            ffn_out = hk.dropout(hk.next_rng_key(), dropout_rate, ffn_out)
+            # ffn_out = DenseBlock(init_scale, name=f'h{i}_mlp')(ffn_inputs_partitioned[i])
+            ffn_out = SNormDenseBlock(init_scale, name=f'h{i}_mlp')(ffn_inputs_partitioned[i])
+            ffn_out = hk.dropout(hk.next_rng_key(), dropout_rate, ffn_out) + inputs_partitioned[i]  # input injections
+            # ffn_out = hk.dropout(hk.next_rng_key(), dropout_rate, ffn_out)
+            # ffn_out = layer_norm(ffn_out)  # output layer norm
             ffn_outputs_partitioned.append(ffn_out)
 
         outputs_partitioned = []

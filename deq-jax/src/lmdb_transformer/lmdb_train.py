@@ -35,7 +35,6 @@ from src.lmdb_transformer import lmdb_dataset
 from src.lmdb_transformer import transformer_model
 from src.modules.deq import deq, wtie
 
-
 flags.DEFINE_integer('batch_size', 64, 'Train batch size per core')
 flags.DEFINE_integer('sequence_length', 128, 'Sequence length to learn on')
 
@@ -59,7 +58,6 @@ flags.DEFINE_string('exp_name', 'deq',
                     'Experiment Name.')
 
 FLAGS = flags.FLAGS
-
 
 LOG_EVERY = 50
 EVAL_EVERY = 500
@@ -129,12 +127,53 @@ def build_forward_fn(vocab_size: int, d_model: int, num_heads: int,
     return forward_fn
 
 
+def update_snorm_stats(params, n_steps=1, eps=1e-4):
+    '''Update the `u0` parameters for spectral normalization'''
+    # snorm_params_names = [k for k, v in params.items() if 'w_sn' in k]
+    pred = lambda module_name, name, value: 'u0' in name
+    snorm_module_names = [k for k, v in hk.data_structures.filter(pred, params).items()]
+
+    for snorm_module in snorm_module_names:
+        snorm_u0 = params[snorm_module]['u0']
+        snorm_weight = params[snorm_module]['w']
+
+        # print(">>>1", params[snorm_module]['u0'].mean(), params[snorm_module]['w'].mean())
+        for _ in range(n_steps):
+            snorm_v0 = transformer_model._l2_normalize(jnp.matmul(snorm_u0, snorm_weight.transpose([1, 0])), eps=eps)
+            snorm_u0 = transformer_model._l2_normalize(jnp.matmul(snorm_v0, snorm_weight), eps=eps)
+
+        snorm_u0 = jax.lax.stop_gradient(snorm_u0)
+        snorm_v0 = jax.lax.stop_gradient(snorm_v0)
+
+        sigma = jnp.matmul(jnp.matmul(snorm_v0, snorm_weight), jnp.transpose(snorm_u0))[0, 0]
+
+        # snorm_weight /= sigma
+
+        def fn(module_name, name, value):
+            if module_name == snorm_module and name == 'u0':
+                return snorm_u0
+            # elif module_name == snorm_module and name == 'w':
+            #     return snorm_weight
+            elif module_name == snorm_module and name == 'sigma':
+                return sigma
+            else:
+                return value
+
+        params = hk.data_structures.map(fn, params)
+
+        # print(">>>2", params[snorm_module]['u0'].mean(), params[snorm_module]['w'].mean())
+
+    return params
+
+
 def bcl_loss_accuracy_fn(forward_fn,
                          params,
                          rng,
                          data: Mapping[str, jnp.ndarray],
                          is_training: bool = True):
     """Compute the loss on data wrt params."""
+    if is_training:
+        params = update_snorm_stats(params)
     logits = forward_fn(params, rng, data, is_training)
     targets = data['label']
     assert logits.shape == targets.shape, (logits.shape, targets.shape)
@@ -248,8 +287,8 @@ class CheckpointingUpdater:
 def main(_):
     # init logger
     wandb.init(entity='ryoungj', project="csc-2541-deq",
-               name=FLAGS.exp_name, config=FLAGS, resume=True, id="____"+FLAGS.exp_name,
-               dir=FLAGS.checkpoint_dir)
+               name=FLAGS.exp_name, config=FLAGS, resume=True, id=FLAGS.exp_name,
+               dir=os.path.join(FLAGS.checkpoint_dir, FLAGS.exp_name))
 
     # Create the dataset.
     train_dataset, test_dataset, vocab_size = lmdb_dataset.load(FLAGS.batch_size,
@@ -264,13 +303,18 @@ def main(_):
     forward_fn = hk.transform(forward_fn)
     loss_fn = lambda params, rng, data: bcl_loss_accuracy_fn(forward_fn.apply,
                                                              params, rng, data, is_training=True)[0]
+    test_loss_fn = lambda params, rng, data: bcl_loss_accuracy_fn(forward_fn.apply,
+                                                                  params, rng, data,
+                                                                  is_training=False)
+    test_loss_fn = jax.jit(test_loss_fn)
 
     optimizer = optax.chain(
         optax.clip_by_global_norm(FLAGS.grad_clip_value),
         optax.adam(FLAGS.learning_rate, b1=0.9, b2=0.99))
 
     updater = Updater(forward_fn.init, loss_fn, optimizer)
-    updater = CheckpointingUpdater(updater, os.path.join(FLAGS.checkpoint_dir, FLAGS.exp_name), checkpoint_every_n=SAVE_EVERY)
+    updater = CheckpointingUpdater(updater, os.path.join(FLAGS.checkpoint_dir, FLAGS.exp_name),
+                                   checkpoint_every_n=SAVE_EVERY)
 
     # Initialize parameters.
     logging.info('Initializing parameters...')
@@ -301,8 +345,7 @@ def main(_):
 
                 batch_num = 0
                 for test_data in test_dataset:
-                    loss, accuracy = bcl_loss_accuracy_fn(forward_fn.apply,
-                                                          state['params'], rng, test_data, is_training=False)
+                    loss, accuracy = test_loss_fn(state['params'], rng, test_data)
                     test_loss += loss
                     test_accuracy += accuracy
                     batch_num += 1
@@ -321,7 +364,6 @@ def main(_):
                     logging.info('Serializing experiment state to %s', path)
                     with open(path, 'wb') as f:
                         pickle.dump(checkpoint_state, f)
-
 
             prev_time = time.time()
 
