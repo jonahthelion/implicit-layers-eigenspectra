@@ -15,6 +15,8 @@ from jax.flatten_util import ravel_pytree
 import matplotlib as mpl
 mpl.use('Agg')
 import matplotlib.pyplot as plt
+import matplotlib.colors as mcolors
+import matplotlib.cm as cmx
 
 # hacky but fine for now
 sys.path.append('./source/deq-jax')
@@ -105,9 +107,13 @@ def train_mlp():
     params = avg_params = net.init(jax.random.PRNGKey(42), next(train))
     opt_state = opt.init(params)
 
+    totalsteps = 10001
+    save_ts = set(list((onp.power(onp.linspace(0.0, 1.0, 10), 3.0) * (totalsteps-1)).astype(onp.int)))
+    print(save_ts)
+
     # Train/eval loop.
-    for step in range(10001):
-        if step % 1000 == 0:
+    for step in range(totalsteps):
+        if step in save_ts:
             # Periodically evaluate classification accuracy on train & test sets.
             train_accuracy = accuracy(avg_params, next(train_eval))
             test_accuracy = accuracy(avg_params, next(test_eval))
@@ -181,7 +187,7 @@ def eval_mlp_spectrum(mfolder):
         pickle.dump({'density': density, 'grids': grids}, open(outname, "wb" ))
 
 
-def plot_mlp_spectrum(mfolder, imname='./silly.jpg'):
+def plot_mlp_spectrum(mfolder, imname='./mlpmnist.png'):
     fs = sorted(glob(os.path.join(mfolder, 'spec*.pkl')))
 
     f2data = {f: pickle.load(open(f, "rb" )) for f in fs}
@@ -190,15 +196,20 @@ def plot_mlp_spectrum(mfolder, imname='./silly.jpg'):
             )
     xlim = (xlim[0] - (xlim[1] - xlim[0])*0.02, xlim[1] + (xlim[1] - xlim[0])*0.02)
     ylim = (1e-6, 1e2)
+    maxsteps = max([int(f.split('/')[-1].replace('spec', '').replace('.pkl', '')) for f in fs])
 
-    fig = plt.figure(figsize=(15, 7))
+    # plot colors
+    cNorm = mcolors.Normalize(vmin=-0.1, vmax=1.1)
+    scalarMap = cmx.ScalarMappable(norm=cNorm, cmap=plt.get_cmap('winter'))
+
+    fig = plt.figure(figsize=(20, 7))
     gs = mpl.gridspec.GridSpec(len(fs), 1, left=0.05, right=0.95, top=0.95, bottom=0.05)
-    for fi,f in enumerate(fs):
+    for fi,f in enumerate(reversed(fs)):
         numsteps = int(f.split('/')[-1].replace('spec', '').replace('.pkl', ''))
         data = f2data[f]
 
         ax = plt.subplot(gs[fi, 0])
-        plt.fill_between(data['grids'], data['density'], color=f'C{fi}')
+        plt.fill_between(data['grids'], data['density'], color=scalarMap.to_rgba((numsteps/maxsteps)**(1/6)))
         plt.ylim(ylim)
         plt.xlim(xlim)
         plt.yscale('log')
@@ -209,11 +220,15 @@ def plot_mlp_spectrum(mfolder, imname='./silly.jpg'):
         if fi != len(fs) - 1:
             ax.set_xticklabels([])
             ax.get_xaxis().set_ticks([])
+        else:
+            ax.tick_params(axis='x', which='major', labelsize=14)
+            ax.tick_params(axis='x', which='minor', labelsize=14)
         for s in ['top', 'right', 'left']:
             ax.spines[s].set_visible(False)
-        plt.text(xlim[0] - (xlim[1] - xlim[0])*0.01, ylim[0] * onp.power(ylim[1]/ylim[0], 0.1), f'{numsteps}\nSteps', rotation='horizontal', fontsize=8)
+        plt.text(xlim[0] - (xlim[1] - xlim[0])*0.035, ylim[0] * onp.power(ylim[1]/ylim[0], 0.1), f'{numsteps}\nsteps',
+                 rotation='horizontal', fontsize=14)
         if fi == 0:
-            plt.title('MLP Hessian Eigenspectra (MNIST)')
+            plt.title('MLP Hessian Eigenspectra (MNIST)', fontsize=24)
     gs.update(hspace=-0.5)
 
     # plt.tight_layout()

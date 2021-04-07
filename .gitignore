@@ -132,3 +132,4 @@ dmypy.json
 *.jpg
 *.mp4
 storage/mlps
+*.png
