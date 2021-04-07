@@ -9,6 +9,7 @@ if __name__ == "__main__":
         'check_inverse': source.explore.check_inverse,
 
         'train_mlp': source.train.train_mlp,
+        'train_deq': source.train.train_deq,
         'eval_model': source.train.eval_model,
         'eval_mlp_spectrum': source.train.eval_mlp_spectrum,
         'plot_mlp_spectrum': source.train.plot_mlp_spectrum,

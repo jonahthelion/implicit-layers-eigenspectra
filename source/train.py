@@ -35,10 +35,44 @@ def net_fn(batch) -> jnp.ndarray:
     mlp = hk.Sequential([
         hk.Flatten(),
         hk.Linear(30), jax.nn.relu,
-        hk.Linear(10), jax.nn.relu,
+        hk.Linear(30), jax.nn.relu,
         hk.Linear(10),
     ])
     return mlp(x)
+
+
+class FeedForwardBlock(hk.Module):
+    def __init__(self):
+        super().__init__()
+    def __call__(self, h, input_embs):
+        hidden_size = h.shape[-1]
+        h = hk.Linear(hidden_size, with_bias=False)(h) + input_embs
+        h = jax.nn.relu(h)
+        return h
+
+
+def deq_fn(batch):
+    x = batch['image'].astype(jnp.float32) / 255.
+    x = hk.Flatten()(x)
+    x = hk.Linear(30)(x)
+
+    # add dummy dimension
+    newx = x.reshape((x.shape[0], x.shape[1], 1))
+    h = jnp.zeros_like(newx)
+
+    fcn_block = FeedForwardBlock()
+    transformed_net = hk.transform(fcn_block)
+
+    # lift params
+    inner_params = hk.experimental.lift(
+        transformed_net.init)(hk.next_rng_key(), h, newx)
+
+    def f(_params, _rng, _z, *args): return transformed_net.apply(_params, _rng, _z, *args)
+
+    x = deq(inner_params, hk.next_rng_key(), h, f, 50, newx)[:, :, 0]
+    x = hk.Linear(10)(x)
+
+    return x
 
 
 def load_dataset(
@@ -57,7 +91,7 @@ def load_dataset(
 # Training loss (cross-entropy).
 def loss_function(params, batch, net) -> jnp.ndarray:
     """Compute the loss of the network, including L2."""
-    logits = net.apply(params, batch)
+    logits = net.apply(params, jax.random.PRNGKey(42), batch)
     labels = jax.nn.one_hot(batch["label"], 10)
 
     l2_loss = 0.5 * sum(jnp.sum(jnp.square(p)) for p in jax.tree_leaves(params))
@@ -68,8 +102,18 @@ def loss_function(params, batch, net) -> jnp.ndarray:
 
 
 def train_mlp():
-    # Make the network and optimiser.
-    net = hk.without_apply_rng(hk.transform(net_fn))
+    # network to train
+    net = hk.transform(net_fn)
+    train_core(net, saveprefix='mlp')
+
+
+def train_deq():
+    net = hk.transform(deq_fn)
+    train_core(net, saveprefix='deq')
+
+
+def train_core(net, saveprefix):
+    # Make the optimiser
     opt = optax.adam(1e-3)
 
     loss = lambda params,batch: loss_function(params, batch, net)
@@ -77,7 +121,7 @@ def train_mlp():
     # Evaluation metric (classification accuracy).
     @jax.jit
     def accuracy(params, batch):
-        predictions = net.apply(params, batch)
+        predictions = net.apply(params, jax.random.PRNGKey(42), batch)
         return jnp.mean(jnp.argmax(predictions, axis=-1) == batch["label"])
 
     @jax.jit
@@ -109,7 +153,6 @@ def train_mlp():
 
     totalsteps = 10001
     save_ts = set(list((onp.power(onp.linspace(0.0, 1.0, 10), 3.0) * (totalsteps-1)).astype(onp.int)))
-    print(save_ts)
 
     # Train/eval loop.
     for step in range(totalsteps):
@@ -120,7 +163,7 @@ def train_mlp():
             print(f"[Step {step}] Train / Test accuracy: {train_accuracy:.3f} / {test_accuracy:.3f}")
 
             # save model weights
-            mname = f'storage/mlps/mlp{step:07}.pkl'
+            mname = f'storage/mnist/{saveprefix}{step:07}.pkl'
             print('saving', mname)
             pickle.dump(avg_params, open(mname, "wb" ))
 
@@ -129,16 +172,16 @@ def train_mlp():
         avg_params = ema_update(params, avg_params)
 
 
-def eval_model(mpath):
+def eval_model(mpath, is_deq=False):
     """Check that we can re-load a model and get the same
     training and test accuracy
     """
-    net = hk.without_apply_rng(hk.transform(net_fn))
+    net = hk.transform(net_fn) if not is_deq else hk.transform(deq_fn)
 
     # Evaluation metric (classification accuracy).
     @jax.jit
     def accuracy(params, batch):
-        predictions = net.apply(params, batch)
+        predictions = net.apply(params, jax.random.PRNGKey(42), batch)
         return jnp.mean(jnp.argmax(predictions, axis=-1) == batch["label"])
 
     # Make datasets.
@@ -158,7 +201,7 @@ def eval_model(mpath):
 
 
 def eval_mlp_spectrum(mfolder):
-    net = hk.without_apply_rng(hk.transform(net_fn))
+    net = hk.transform(net_fn)
 
     train_eval = load_dataset("train", is_training=False, batch_size=60000)
     test_eval = load_dataset("test", is_training=False, batch_size=10000)
@@ -178,7 +221,7 @@ def eval_mlp_spectrum(mfolder):
 
         hvp, unravel, num_params = hessian_computation.get_hvp_fn(loss, avg_params, batches_fn)
         hvp_cl = lambda v: hvp(avg_params, v)
-        print('hvp')
+        print('running hvp')
         tridiag, vecs = lanczos.lanczos_alg(hvp_cl, num_params, order=90, rng_key=jaxrnd.PRNGKey(0))
         print('discretizing')
         density, grids = density_lib.tridiag_to_density([tridiag], grid_len=10000, sigma_squared=1e-5)
