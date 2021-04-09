@@ -10,6 +10,7 @@ if __name__ == "__main__":
 
         'train_mlp': source.train.train_mlp,
         'train_deq': source.train.train_deq,
+        'train_deq_init': source.train.train_deq_init,
         'eval_model': source.train.eval_model,
         'eval_mlp_spectrum': source.train.eval_mlp_spectrum,
         'eval_deq_spectrum': source.train.eval_deq_spectrum,

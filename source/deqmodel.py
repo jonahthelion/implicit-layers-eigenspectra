@@ -18,30 +18,55 @@ def prepro_fn(batch, hidden_size):
     return x.reshape((x.shape[0], 1, x.shape[1]))
 
 
+class CustomDEQInit(hk.initializers.Initializer):
+  def __init__(self,
+               stddev=1.,
+               mean=0.):
+    self.stddev = stddev
+    self.mean = mean
+
+  def __call__(self, shape, dtype):
+    m = jax.lax.convert_element_type(self.mean, dtype)
+    s = jax.lax.convert_element_type(self.stddev, dtype)
+    unscaled = jax.random.truncated_normal(hk.next_rng_key(), -2., 2., shape,
+                                           dtype)
+    mat = s * unscaled + m
+
+    # adjust matrix so that (I-W)^{-1} = A
+    final = (mat - jnp.eye(shape[0])) @ jnp.linalg.inv(mat)
+
+    return final
+
+
 class FeedForwardBlock(hk.Module):
-    def __init__(self):
+    def __init__(self, custom_init):
         super().__init__()
+        self.custom_init = custom_init
     def __call__(self, h, input_embs):
         B, _, H = h.shape
-        h = hk.Linear(H, with_bias=False)(h) + input_embs
+        if self.custom_init:
+            mod = hk.Linear(H, with_bias=False, w_init=CustomDEQInit(stddev=1.0/jnp.sqrt(H)))
+        else:
+            mod = hk.Linear(H, with_bias=False)
+        h = mod(h) + input_embs
         return h
 
 
-def deq_fn(x, hidden_size, max_steps, kind, z=None):
+def deq_fn(x, hidden_size, max_steps, kind, z=None, custom_init=False):
     h = jnp.zeros_like(x)
 
-    fcn_block = FeedForwardBlock()
+    fcn_block = FeedForwardBlock(custom_init)
     transformed_net = hk.transform(fcn_block)
     inner_params = hk.experimental.lift(
         transformed_net.init)(hk.next_rng_key(), h, x)
     def f(_params, _rng, _z, *args): return transformed_net.apply(_params, _rng, _z, *args)
 
     if kind == 'analytic':
-        matinv = jnp.eye(hidden_size) - inner_params['feed_forward_block/linear']['w']
+        matinv = jnp.linalg.inv(jnp.eye(hidden_size) - inner_params['feed_forward_block/linear']['w'])
         B, _, H = x.shape
-        x0 = jnp.linalg.solve(matinv.T.reshape(1, H, H).repeat(B, 0), x.squeeze(1)).reshape((B, 1, H))
+        x0 = jnp.dot(x.squeeze(1), matinv).reshape((B, 1, H))
     elif kind == 'forward':
-        x0 = deq(inner_params, hk.next_rng_key(), h, f, max_steps, x)
+        x0 = deq(inner_params, jax.random.PRNGKey(42), h, f, max_steps, x)
     elif kind == 'zstar':
         x0 = jax.lax.stop_gradient(deq(inner_params, hk.next_rng_key(), h, f, max_steps, x))
     elif kind == 'f':
@@ -55,10 +80,10 @@ def postpro_fn(x):
     return x
 
 
-def full_deq_fn(x, kind, hidden_size, max_steps, z=None):
+def full_deq_fn(x, kind, hidden_size, max_steps, z=None, custom_init=False):
     if kind == 'forward':
         x = prepro_fn(x, hidden_size)
-        x = deq_fn(x, hidden_size, max_steps, kind)
+        x = deq_fn(x, hidden_size, max_steps, kind, custom_init=custom_init)
         x = postpro_fn(x)
     elif kind == 'analytic':
         x = prepro_fn(x, hidden_size)

@@ -34,15 +34,21 @@ from .deqmodel import full_deq_fn, our_gradient, our_hvp
 def net_fn(batch) -> jnp.ndarray:
     """Standard LeNet-300-100 MLP network."""
     x = batch["image"].astype(jnp.float32) / 255.
-    mlp = hk.Sequential([
+    first_layer = hk.Sequential([
         hk.Flatten(),
         hk.Linear(10),
-        # jax.nn.relu,
-        hk.Linear(10),
-        # jax.nn.relu,
-        hk.Linear(10),
     ])
-    return mlp(x)
+    middle = hk.Linear(10, with_bias=False)
+    last_layer = hk.Linear(10)
+    # this ensures that if the hidden size is the same, deq weights = mlp weights
+    x = first_layer(x)
+    transformed_net = hk.transform(middle)
+    inner_params = hk.experimental.lift(
+        transformed_net.init)(hk.next_rng_key(), x)
+    x = transformed_net.apply(inner_params, None, x)
+    x = last_layer(x)
+
+    return x
 
 
 def load_dataset(
@@ -81,6 +87,11 @@ def train_mlp():
 def train_deq(hidden_size=10, max_steps=10):
     net = hk.transform(lambda x: full_deq_fn(x, 'forward', hidden_size, max_steps))
     train_core(net, saveprefix='deq')
+
+
+def train_deq_init(hidden_size=10, max_steps=10):
+    net = hk.transform(lambda x: full_deq_fn(x, 'forward', hidden_size, max_steps, custom_init=True))
+    train_core(net, saveprefix='deqinit')
 
 
 def train_core(net, saveprefix):
@@ -148,7 +159,7 @@ def eval_model(mpath, is_deq=False):
     training and test accuracy
     """
     print('is testing deq model:', is_deq)
-    net = hk.transform(net_fn) if not is_deq else hk.transform(lambda x: full_deq_fn(x, 'forward', hidden_size=10, max_steps=10))
+    net = hk.transform(net_fn) if not is_deq else hk.transform(lambda x: full_deq_fn(x, 'analytic', hidden_size=10, max_steps=10))
 
     # Evaluation metric (classification accuracy).
     @jax.jit
