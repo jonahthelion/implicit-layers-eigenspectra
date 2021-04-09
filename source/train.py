@@ -28,51 +28,21 @@ import density as density_lib
 import lanczos
 import hessian_computation
 
+from .deqmodel import full_deq_fn
+
 
 def net_fn(batch) -> jnp.ndarray:
     """Standard LeNet-300-100 MLP network."""
     x = batch["image"].astype(jnp.float32) / 255.
     mlp = hk.Sequential([
         hk.Flatten(),
-        hk.Linear(30), jax.nn.relu,
-        hk.Linear(30), jax.nn.relu,
+        hk.Linear(10),
+        # jax.nn.relu,
+        hk.Linear(10),
+        # jax.nn.relu,
         hk.Linear(10),
     ])
     return mlp(x)
-
-
-class FeedForwardBlock(hk.Module):
-    def __init__(self):
-        super().__init__()
-    def __call__(self, h, input_embs):
-        hidden_size = h.shape[-1]
-        h = hk.Linear(hidden_size, with_bias=False)(h) + input_embs
-        h = jax.nn.relu(h)
-        return h
-
-
-def deq_fn(batch):
-    x = batch['image'].astype(jnp.float32) / 255.
-    x = hk.Flatten()(x)
-    x = hk.Linear(30)(x)
-
-    # add dummy dimension
-    newx = x.reshape((x.shape[0], x.shape[1], 1))
-    h = jnp.zeros_like(newx)
-
-    fcn_block = FeedForwardBlock()
-    transformed_net = hk.transform(fcn_block)
-
-    # lift params
-    inner_params = hk.experimental.lift(
-        transformed_net.init)(hk.next_rng_key(), h, newx)
-
-    def f(_params, _rng, _z, *args): return transformed_net.apply(_params, _rng, _z, *args)
-
-    x = deq(inner_params, hk.next_rng_key(), h, f, 50, newx)[:, :, 0]
-    x = hk.Linear(10)(x)
-
-    return x
 
 
 def load_dataset(
@@ -89,12 +59,13 @@ def load_dataset(
 
 
 # Training loss (cross-entropy).
-def loss_function(params, batch, net) -> jnp.ndarray:
+def loss_function(params, batch, net, logits=None) -> jnp.ndarray:
     """Compute the loss of the network, including L2."""
-    logits = net.apply(params, jax.random.PRNGKey(42), batch)
+    if logits is None:
+        logits = net.apply(params, jax.random.PRNGKey(42), batch)
     labels = jax.nn.one_hot(batch["label"], 10)
 
-    l2_loss = 0.5 * sum(jnp.sum(jnp.square(p)) for p in jax.tree_leaves(params))
+    # l2_loss = 0.5 * sum(jnp.sum(jnp.square(p)) for p in jax.tree_leaves(params))
     softmax_xent = -jnp.sum(labels * jax.nn.log_softmax(logits))
     softmax_xent /= labels.shape[0]
 
@@ -107,8 +78,8 @@ def train_mlp():
     train_core(net, saveprefix='mlp')
 
 
-def train_deq():
-    net = hk.transform(deq_fn)
+def train_deq(hidden_size=10, max_steps=10):
+    net = hk.transform(lambda x: full_deq_fn(x, 'forward', hidden_size, max_steps))
     train_core(net, saveprefix='deq')
 
 
@@ -176,7 +147,8 @@ def eval_model(mpath, is_deq=False):
     """Check that we can re-load a model and get the same
     training and test accuracy
     """
-    net = hk.transform(net_fn) if not is_deq else hk.transform(deq_fn)
+    print('is testing deq model:', is_deq)
+    net = hk.transform(net_fn) if not is_deq else hk.transform(lambda x: full_deq_fn(x, 'forward', hidden_size=10, max_steps=10))
 
     # Evaluation metric (classification accuracy).
     @jax.jit
@@ -200,7 +172,7 @@ def eval_model(mpath, is_deq=False):
         f"{train_accuracy:.3f} / {test_accuracy:.3f}.")
 
 
-def eval_mlp_spectrum(mfolder):
+def eval_mlp_spectrum(mfolder='./storage/mnist'):
     net = hk.transform(net_fn)
 
     train_eval = load_dataset("train", is_training=False, batch_size=60000)
@@ -216,10 +188,10 @@ def eval_mlp_spectrum(mfolder):
     fs = glob(os.path.join(mfolder, 'mlp*.pkl'))
     for f in fs:
         base = f.split('/')[-1].replace('mlp', '').replace('.pkl', '')
-        outname = os.path.join(mfolder, f'spec{base}.pkl')
+        outname = os.path.join(mfolder, f'specmlp{base}.pkl')
         avg_params = pickle.load(open(f, "rb" ))
 
-        hvp, unravel, num_params = hessian_computation.get_hvp_fn(loss, avg_params, batches_fn)
+        hvp, _, num_params = hessian_computation.get_hvp_fn(loss, avg_params, batches_fn)
         hvp_cl = lambda v: hvp(avg_params, v)
         print('running hvp')
         tridiag, vecs = lanczos.lanczos_alg(hvp_cl, num_params, order=90, rng_key=jaxrnd.PRNGKey(0))
@@ -230,16 +202,55 @@ def eval_mlp_spectrum(mfolder):
         pickle.dump({'density': density, 'grids': grids}, open(outname, "wb" ))
 
 
-def plot_mlp_spectrum(mfolder, imname='./mlpmnist.png'):
-    fs = sorted(glob(os.path.join(mfolder, 'spec*.pkl')))
+def eval_deq_spectrum(mfolder='./storage/mnist', rnd_seed=42, hidden_size=10, max_steps=10):
+    net = hk.transform(lambda x,kind,z=None: full_deq_fn(x, kind, hidden_size, max_steps, z))
 
+    train_eval = load_dataset("train", is_training=False, batch_size=60000)
+    test_eval = load_dataset("test", is_training=False, batch_size=10000)
+
+    batch = next(train_eval)
+
+    fs = glob(os.path.join(mfolder, 'deq*.pkl'))
+    for f in fs:
+        base = f.split('/')[-1].replace('deq', '').replace('.pkl', '')
+        outname = os.path.join(mfolder, f'specdeq{base}.pkl')
+        avg_params = pickle.load(open(f, "rb" ))
+
+        flat_params, unravel = ravel_pytree(avg_params)
+
+        # hvp function
+        ana_f = lambda params,x: net.apply(params, jax.random.PRNGKey(rnd_seed), x, 'analytic')
+        loss_f = lambda x: loss_function(None, batch, None, x)
+        hvp = jax.jit(lambda v: jax.jvp(lambda p: jax.grad(lambda params: loss_f(ana_f(params, batch)))(p), [avg_params], [v])[1])
+        hvp_cl = lambda v: ravel_pytree(hvp(unravel(v)))[0]
+
+        print('running hvp')
+        tridiag, vecs = lanczos.lanczos_alg(hvp_cl, flat_params.shape[0], order=90, rng_key=jaxrnd.PRNGKey(0))
+        print('discretizing')
+        density, grids = density_lib.tridiag_to_density([tridiag], grid_len=10000, sigma_squared=1e-5)
+
+        print('saving', outname)
+        pickle.dump({'density': density, 'grids': grids}, open(outname, "wb" ))
+
+
+def plot_mlp_spectrum(mfolder='./storage/mnist', imname='mlpmnist.png'):
+    fs = sorted(glob(os.path.join(mfolder, 'specmlp*.pkl')))
+    plot_spectrum_core(fs, imname, 'MLP Hessian Eigenspectra (MNIST)')
+
+
+def plot_deq_spectrum(mfolder='./storage/mnist', imname='deqmnist.png'):
+    fs = sorted(glob(os.path.join(mfolder, 'specdeq*.pkl')))
+    plot_spectrum_core(fs, imname, 'DEQ Hessian Eigenspectra (MNIST)')
+
+
+def plot_spectrum_core(fs, imname, plottitle):
     f2data = {f: pickle.load(open(f, "rb" )) for f in fs}
     xlim = (min((min(row['grids']) for row in f2data.values())),
             max((max(row['grids']) for row in f2data.values()))
             )
     xlim = (xlim[0] - (xlim[1] - xlim[0])*0.02, xlim[1] + (xlim[1] - xlim[0])*0.02)
     ylim = (1e-6, 1e2)
-    maxsteps = max([int(f.split('/')[-1].replace('spec', '').replace('.pkl', '')) for f in fs])
+    maxsteps = max([int(f.split('/')[-1].replace('spec', '').replace('.pkl', '').replace('mlp', '').replace('deq', '')) for f in fs])
 
     # plot colors
     cNorm = mcolors.Normalize(vmin=-0.1, vmax=1.1)
@@ -248,7 +259,7 @@ def plot_mlp_spectrum(mfolder, imname='./mlpmnist.png'):
     fig = plt.figure(figsize=(20, 7))
     gs = mpl.gridspec.GridSpec(len(fs), 1, left=0.05, right=0.95, top=0.95, bottom=0.05)
     for fi,f in enumerate(reversed(fs)):
-        numsteps = int(f.split('/')[-1].replace('spec', '').replace('.pkl', ''))
+        numsteps = int(f.split('/')[-1].replace('spec', '').replace('.pkl', '').replace('mlp', '').replace('deq', ''))
         data = f2data[f]
 
         ax = plt.subplot(gs[fi, 0])
@@ -271,7 +282,7 @@ def plot_mlp_spectrum(mfolder, imname='./mlpmnist.png'):
         plt.text(xlim[0] - (xlim[1] - xlim[0])*0.035, ylim[0] * onp.power(ylim[1]/ylim[0], 0.1), f'{numsteps}\nsteps',
                  rotation='horizontal', fontsize=14)
         if fi == 0:
-            plt.title('MLP Hessian Eigenspectra (MNIST)', fontsize=24)
+            plt.title(plottitle, fontsize=24)
     gs.update(hspace=-0.5)
 
     # plt.tight_layout()

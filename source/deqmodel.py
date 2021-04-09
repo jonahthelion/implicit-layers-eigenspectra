@@ -36,8 +36,9 @@ def deq_fn(x, hidden_size, max_steps, kind, z=None):
     def f(_params, _rng, _z, *args): return transformed_net.apply(_params, _rng, _z, *args)
 
     if kind == 'analytic':
-        matinv = jnp.linalg.inv(jnp.eye(hidden_size) - inner_params['feed_forward_block/linear']['w'])
-        x0 = jnp.array([x[b,0] @ matinv for b in range(len(x))]).reshape(x.shape[0], 1, hidden_size)
+        matinv = jnp.eye(hidden_size) - inner_params['feed_forward_block/linear']['w']
+        B, _, H = x.shape
+        x0 = jnp.linalg.solve(matinv.T.reshape(1, H, H).repeat(B, 0), x.squeeze(1)).reshape((B, 1, H))
     elif kind == 'forward':
         x0 = deq(inner_params, hk.next_rng_key(), h, f, max_steps, x)
     elif kind == 'zstar':
@@ -91,6 +92,7 @@ def our_gradient(final_loss_f, f_f, zstar, x0, prepro_f, batch, params):
     mats = jnp.array([
         jnp.eye(H) - jacfwd(f_f, 2)(params, x.reshape(1,1,H),z.reshape(1,1,H)).reshape(H,H).T for x,z in zip(x0, zstar)
     ])
+
     mats = jnp.linalg.solve(mats, grad(final_loss_f, 1)(params, zstar).squeeze(1)).reshape(B, 1, H)
     _, vjp_func = vjp(lambda x: f_f(x, x0, zstar), params)
     vec1 = vjp_func(mats)[0]
