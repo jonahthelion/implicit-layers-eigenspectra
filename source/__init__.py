@@ -1,1 +1,1 @@
-from . import explore, train, toy, sanity_check
+from . import explore, train, toy, sanity_check, deqmodel
