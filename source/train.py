@@ -89,7 +89,7 @@ def train_deq(hidden_size=10, max_steps=10):
     train_core(net, saveprefix='deq')
 
 
-def train_deq_init(hidden_size=10, max_steps=10):
+def train_deq_init(hidden_size=10, max_steps=50):
     net = hk.transform(lambda x: full_deq_fn(x, 'forward', hidden_size, max_steps, custom_init=True))
     train_core(net, saveprefix='deqinit')
 
@@ -196,7 +196,8 @@ def eval_mlp_spectrum(mfolder='./storage/mnist'):
     def batches_fn():
         yield batch
 
-    fs = glob(os.path.join(mfolder, 'mlp*.pkl'))
+    fs = sorted(glob(os.path.join(mfolder, 'mlp*.pkl')))
+    print(fs)
     for f in fs:
         base = f.split('/')[-1].replace('mlp', '').replace('.pkl', '')
         outname = os.path.join(mfolder, f'specmlp{base}.pkl')
@@ -213,7 +214,7 @@ def eval_mlp_spectrum(mfolder='./storage/mnist'):
         pickle.dump({'density': density, 'grids': grids}, open(outname, "wb" ))
 
 
-def eval_deq_spectrum(mfolder='./storage/mnist', rnd_seed=42, hidden_size=10, max_steps=10):
+def eval_deq_spectrum(deq_init, mfolder='./storage/mnist', rnd_seed=42, hidden_size=10, max_steps=10):
     net = hk.transform(lambda x,kind,z=None: full_deq_fn(x, kind, hidden_size, max_steps, z))
 
     train_eval = load_dataset("train", is_training=False, batch_size=60000)
@@ -221,10 +222,14 @@ def eval_deq_spectrum(mfolder='./storage/mnist', rnd_seed=42, hidden_size=10, ma
 
     batch = next(train_eval)
 
-    fs = glob(os.path.join(mfolder, 'deq*.pkl'))
+    basename = 'deqinit' if deq_init else 'deq'
+    fs = sorted(glob(os.path.join(mfolder, f'{basename}*.pkl'))) if deq_init else sorted(glob(os.path.join(mfolder, f'{basename}*.pkl')))
+    if not deq_init:
+        fs = [f for f in fs if not 'deqinit' in f]
+    print(fs)
     for f in fs:
-        base = f.split('/')[-1].replace('deq', '').replace('.pkl', '')
-        outname = os.path.join(mfolder, f'specdeq{base}.pkl')
+        base = f.split('/')[-1].replace('deq', '').replace('init', '').replace('.pkl', '')
+        outname = os.path.join(mfolder, f'spec{basename}{base}.pkl')
         avg_params = pickle.load(open(f, "rb" ))
 
         flat_params, unravel = ravel_pytree(avg_params)
@@ -258,12 +263,21 @@ def eval_deq_spectrum(mfolder='./storage/mnist', rnd_seed=42, hidden_size=10, ma
 
 def plot_mlp_spectrum(mfolder='./storage/mnist', imname='mlpmnist.png'):
     fs = sorted(glob(os.path.join(mfolder, 'specmlp*.pkl')))
-    plot_spectrum_core(fs, imname, 'MLP Hessian Eigenspectra (MNIST)')
+    print(fs)
+    plot_spectrum_core(fs, imname, 'Deep Linear Hessian Eigenspectra (MNIST)')
 
 
-def plot_deq_spectrum(mfolder='./storage/mnist', imname='deqmnist.png'):
-    fs = sorted(glob(os.path.join(mfolder, 'specdeq*.pkl')))
-    plot_spectrum_core(fs, imname, 'DEQ Hessian Eigenspectra (MNIST)')
+def plot_deq_spectrum(deq_init, mfolder='./storage/mnist'):
+    if deq_init:
+        fs = sorted(glob(os.path.join(mfolder, 'specdeqinit*.pkl')))
+        title = 'Deep Linear DEQ Hessian Eigenspectra (Function Init) (MNIST)'
+        imname = 'deqinitmnist.png'
+    else:
+        fs = sorted(glob(os.path.join(mfolder, 'specdeq0*.pkl')))
+        title = 'Deep Linear DEQ Hessian Eigenspectra (Parameter Init) (MNIST)'
+        imname = 'deqmnist.png'
+    print(fs)
+    plot_spectrum_core(fs, imname, title)
 
 
 def plot_spectrum_core(fs, imname, plottitle):
@@ -273,7 +287,7 @@ def plot_spectrum_core(fs, imname, plottitle):
             )
     xlim = (xlim[0] - (xlim[1] - xlim[0])*0.02, xlim[1] + (xlim[1] - xlim[0])*0.02)
     ylim = (1e-6, 1e2)
-    maxsteps = max([int(f.split('/')[-1].replace('spec', '').replace('.pkl', '').replace('mlp', '').replace('deq', '')) for f in fs])
+    maxsteps = max([int(f.split('/')[-1].replace('spec', '').replace('.pkl', '').replace('mlp', '').replace('deq', '').replace('init', '')) for f in fs])
 
     # plot colors
     cNorm = mcolors.Normalize(vmin=-0.1, vmax=1.1)
@@ -282,7 +296,7 @@ def plot_spectrum_core(fs, imname, plottitle):
     fig = plt.figure(figsize=(20, 7))
     gs = mpl.gridspec.GridSpec(len(fs), 1, left=0.05, right=0.95, top=0.95, bottom=0.05)
     for fi,f in enumerate(reversed(fs)):
-        numsteps = int(f.split('/')[-1].replace('spec', '').replace('.pkl', '').replace('mlp', '').replace('deq', ''))
+        numsteps = int(f.split('/')[-1].replace('spec', '').replace('.pkl', '').replace('mlp', '').replace('deq', '').replace('init', ''))
         data = f2data[f]
 
         ax = plt.subplot(gs[fi, 0])
