@@ -1,9 +1,10 @@
 import jax
-from jax import jvp,vjp,grad,jacfwd
+from jax import jvp,vjp,grad,jacfwd,vmap
 import haiku as hk
 import numpy as onp
 import sys
 import jax.numpy as jnp
+from time import time
 
 # hacky but fine for now
 sys.path.append('./source/deq-jax')
@@ -89,9 +90,8 @@ def our_gradient(final_loss_f, f_f, zstar, x0, prepro_f, batch, params):
     B,_,H = zstar.shape
     vec0 = grad(final_loss_f)(params, zstar)
 
-    mats = jnp.array([
-        jnp.eye(H) - jacfwd(f_f, 2)(params, x.reshape(1,1,H),z.reshape(1,1,H)).reshape(H,H).T for x,z in zip(x0, zstar)
-    ])
+    x0zstar = jnp.concatenate((x0, zstar), 1)
+    mats = vmap(lambda x: jnp.eye(H) - jacfwd(f_f, 2)(params, x[0].reshape(1,1,H),x[0].reshape(1,1,H)).reshape(H,H).T)(x0zstar)
 
     mats = jnp.linalg.solve(mats, grad(final_loss_f, 1)(params, zstar).squeeze(1)).reshape(B, 1, H)
     _, vjp_func = vjp(lambda x: f_f(x, x0, zstar), params)
@@ -110,9 +110,9 @@ def our_hvp(grad_f, f_f, prepro_f, zstar, params, x0, batch, queryv):
 
     vec0 = jvp(lambda x: grad_f(zstar, x), [params], [queryv])[1]
 
-    mats = jnp.array([
-        jnp.eye(H) - jacfwd(f_f, 2)(params, x.reshape(1,1,H),z.reshape(1,1,H)).reshape(H,H) for x,z in zip(x0, zstar)
-    ])
+    x0zstar = jnp.concatenate((x0, zstar), 1)
+    mats = vmap(lambda x: jnp.eye(H) - jacfwd(f_f, 2)(params, x[0].reshape(1,1,H),x[0].reshape(1,1,H)).reshape(H,H))(x0zstar)
+
     mats_theta = jnp.linalg.solve(mats, jvp(lambda x: f_f(x, x0, zstar), [params], [queryv])[1].squeeze(1)).reshape(B, 1, H)
     vec1 = jvp(lambda x: grad_f(x, params), [zstar], [mats_theta])[1]
 
@@ -147,7 +147,7 @@ def check_full_deq(rnd_seed=42, bsz=2, hidden_size=3, max_steps=20):
     # 0th order
     deq_out = deq_f(params, batch)
     ana_out = ana_f(params, batch)
-    assert(jnp.allclose(deq_out, ana_out))
+    assert(jnp.allclose(deq_out, ana_out, atol=1e-6))
 
     # 1st order
     deq_grad = grad(lambda params: loss_f(deq_f(params, batch)))(params)

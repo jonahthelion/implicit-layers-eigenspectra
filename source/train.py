@@ -28,7 +28,7 @@ import density as density_lib
 import lanczos
 import hessian_computation
 
-from .deqmodel import full_deq_fn
+from .deqmodel import full_deq_fn, our_gradient, our_hvp
 
 
 def net_fn(batch) -> jnp.ndarray:
@@ -218,11 +218,23 @@ def eval_deq_spectrum(mfolder='./storage/mnist', rnd_seed=42, hidden_size=10, ma
 
         flat_params, unravel = ravel_pytree(avg_params)
 
-        # hvp function
-        ana_f = lambda params,x: net.apply(params, jax.random.PRNGKey(rnd_seed), x, 'analytic')
-        loss_f = lambda x: loss_function(None, batch, None, x)
-        hvp = jax.jit(lambda v: jax.jvp(lambda p: jax.grad(lambda params: loss_f(ana_f(params, batch)))(p), [avg_params], [v])[1])
-        hvp_cl = lambda v: ravel_pytree(hvp(unravel(v)))[0]
+        # # hvp function (analytic)
+        # ana_f = lambda params,x: net.apply(params, jax.random.PRNGKey(rnd_seed), x, 'analytic')
+        # loss_f = lambda x: loss_function(None, batch, None, x)
+        # hvp = jax.jit(lambda v: jax.jvp(lambda p: jax.grad(lambda params: loss_f(ana_f(params, batch)))(p), [avg_params], [v])[1])
+        # hvp_cl = lambda v: ravel_pytree(hvp(unravel(v)))[0]
+
+        # hvp function (implicit)
+        prepro_f = lambda params,x: net.apply(params, None, x, 'prepro')
+        postpro_f = lambda params,x: net.apply(params, None, x, 'postpro')
+        zstar_f = lambda params,x: net.apply(params, jax.random.PRNGKey(rnd_seed), x, 'zstar')
+        final_loss_f = lambda params,z: loss_function(None, batch, None, postpro_f(params, z))
+        f_f = lambda params,x,z: net.apply(params, jax.random.PRNGKey(rnd_seed), x, 'f', z)
+        x0 = prepro_f(avg_params, batch)
+        zstar = zstar_f(avg_params, x0)
+        hvpours = jax.jit(lambda v: our_hvp(lambda z,p: our_gradient(final_loss_f, f_f, z, prepro_f(p, batch), prepro_f, batch, p),
+                    f_f, prepro_f, zstar, avg_params, x0, batch, queryv=v))
+        hvp_cl = lambda v: ravel_pytree(hvpours(unravel(v)))[0]
 
         print('running hvp')
         tridiag, vecs = lanczos.lanczos_alg(hvp_cl, flat_params.shape[0], order=90, rng_key=jaxrnd.PRNGKey(0))
