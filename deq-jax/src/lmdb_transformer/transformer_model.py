@@ -251,7 +251,9 @@ class SNormLinear(hk.Module):
         u0 = hk.get_parameter("u0", [1, output_size], dtype, init=hk.initializers.RandomNormal())
         sigma = hk.get_parameter("sigma", (), dtype, init=hk.initializers.RandomNormal())
 
-        w = w / jax.lax.stop_gradient(sigma)
+        # print(sigma, jnp.linalg.norm(w, 2))
+        w = w / (jax.lax.stop_gradient(sigma) * 1.01)
+        # w = w / (jax.lax.stop_gradient(sigma) + 0.01)
 
         out = jnp.dot(inputs, w, precision=precision)
 

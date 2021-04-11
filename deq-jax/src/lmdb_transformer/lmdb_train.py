@@ -60,9 +60,9 @@ flags.DEFINE_string('exp_name', 'deq',
 FLAGS = flags.FLAGS
 
 LOG_EVERY = 50
-EVAL_EVERY = 500
+EVAL_EVERY = 1000
 SAVE_EVERY = EVAL_EVERY
-MAX_STEPS = 10 * EVAL_EVERY
+MAX_STEPS = 100 * EVAL_EVERY
 
 
 def build_forward_fn(vocab_size: int, d_model: int, num_heads: int,
@@ -327,6 +327,11 @@ def main(_):
     best_test_loss = np.inf
     logging.info('Starting train loop...')
     prev_time = time.time()
+
+    # data = next(train_dataset)
+    # state, metrics = updater.update(state, data)
+    # print("Done!")
+
     for step in range(MAX_STEPS):
         data = next(train_dataset)
         state, metrics = updater.update(state, data)

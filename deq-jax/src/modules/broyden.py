@@ -182,3 +182,86 @@ def broyden(g: Callable, x0: jnp.ndarray, max_iter: int, eps: float, *args) -> d
             "trace": state.trace,
             "eps": eps,
             "maxiter": max_iter}
+
+
+def fixed_point_iter(g: Callable, x0: jnp.ndarray, max_iter: int, eps: float, *args) -> dict:
+    """
+    :param g: Function to find root of (e.g g(x) = f(x)-x)
+    :param x0: Initial guess  (batch_size, hidden, seq_length)
+    :param max_iter: maximum number of iterations.
+    :param eps: terminates minimization when |J^_1|_norm < eps
+    :return:
+    """
+
+    f = lambda x, *args: g(x, *args) + x
+    bsz, total_hsize, seq_len = x0.shape
+    gx = g(x0, *args)  # (bsz, 2d, L')
+    init_objective = jnp.linalg.norm(gx)
+
+    # To be used in protective breaks
+    trace = jnp.zeros(max_iter)
+    trace = jax.ops.index_update(trace, jax.ops.index[0], init_objective)
+    protect_thres = 1e5 * seq_len
+
+    state = _BroydenResults(
+        converged=False,
+        n_step=0,
+        min_x=x0,
+        min_gx=gx,
+        min_objective=init_objective,
+        x=x0,
+        gx=gx,
+        objective=init_objective,
+        trace=trace,
+        Us=jnp.zeros((bsz, total_hsize, seq_len, max_iter)),
+        VTs=jnp.zeros((bsz, max_iter, total_hsize, seq_len)),
+        prot_break=False,
+        prog_break=False,
+    )
+
+    def cond_fun(state: _BroydenResults):
+        return (jnp.logical_not(state.converged) &
+                jnp.logical_not(state.prot_break) &
+                jnp.logical_not(state.prog_break) &
+                (state.n_step < max_iter))
+
+    def body_fun(state: _BroydenResults):
+        new_x = f(state.x, *args)
+        new_gx = g(new_x, *args)
+        state = state._replace(
+            x=new_x,
+            gx=new_gx,
+            n_step=state.n_step + 1,
+        )
+
+        new_objective = jnp.linalg.norm(state.gx)
+        trace = jax.ops.index_update(state.trace, jax.ops.index[state.n_step], new_objective)
+
+        min_found = new_objective < state.min_objective
+        state = state._replace(
+            # if a new minimum is found
+            min_x=jnp.where(min_found, state.x, state.min_x),
+            min_gx=jnp.where(min_found, state.gx, state.min_gx),
+            min_objective=jnp.where(min_found, new_objective, state.min_objective),
+            trace=trace,
+            # check convergence
+            converged=(new_objective < eps),
+            prot_break=(new_objective > init_objective * protect_thres),
+            prog_break=(new_objective < 3. * eps) & (state.n_step > 30) & (jnp.max(state.trace[-30:]) / jnp.min(state.trace[-30:]) < 1.3)
+        )
+
+        return state
+
+
+    # state = body_fun(state)
+    state = jax.lax.while_loop(cond_fun, body_fun, state)
+    # state = jax.lax.fori_loop(0, max_iter, body_fun, state)
+    # state = hk.fori_loop(0, max_iter, body_fun, state)
+    return {"result": state.min_x,
+            "n_step": state.n_step,
+            "diff": jnp.linalg.norm(state.min_gx),
+            "diff_detail": jnp.linalg.norm(state.min_gx, axis=1),
+            "prot_break": state.prot_break,
+            "trace": state.trace,
+            "eps": eps,
+            "maxiter": max_iter}

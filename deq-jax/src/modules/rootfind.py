@@ -3,8 +3,9 @@ from typing import Callable
 
 import jax.numpy as jnp
 import jax
+import numpy as np
 
-from src.modules.broyden import broyden
+from src.modules.broyden import broyden, fixed_point_iter
 
 
 def rootfind_fwd(fun: Callable, max_iter: int, params: dict, rng: jnp.ndarray, x: jnp.ndarray, *args):
@@ -29,6 +30,8 @@ def rootfind_bwd(fun, max_iter, res, grad):
     result_info = broyden(h_fun, dl_df_est, max_iter, eps)
     dl_df_est = result_info['result']
 
+    # np.save('./save/deq_bwd_broyden_step=00000.npy', np.array(result_info['trace']))
+
     # passed back gradient via d/dx and return nothing to other params
     arg_grads = tuple([None for _ in args])
     return_tuple = (None, None, dl_df_est, *arg_grads)
@@ -42,7 +45,10 @@ def rootfind(fun: Callable, max_iter: int, params: dict, rng: jnp.ndarray, x: jn
 
     result_info = jax.lax.stop_gradient(
         broyden(fun, x, max_iter, eps, *args)
+        # fixed_point_iter(fun, x, max_iter, eps, *args)
     )
+    # np.save('./save/deq_fwd_broyden_step=00000.npy', np.array(result_info['trace']))
+    # np.save('./save/eq_deq_fwd_fp_iter_step=25000.npy', np.array(result_info['trace']))
     return result_info['result']
 
 
