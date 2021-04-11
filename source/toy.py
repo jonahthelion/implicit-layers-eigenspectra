@@ -128,7 +128,7 @@ def implicit_eigenspectra(X, Ys, Xgt, Ygt):
     return spectra
 
 
-def linear_regression(rnd_seed=60, eta=0.05):
+def linear_regression(rnd_seed=60, eta=0.05, T=50):
     """Optimize the data (X,Y) such that the LSQ solution
     to (X,Y+noise) fits some other data (X',Y') well.
 
@@ -140,64 +140,92 @@ def linear_regression(rnd_seed=60, eta=0.05):
     onp.random.seed(rnd_seed)
     X,Y,Xgt,Ygt = generate_problem(ntrain=4, ntest=6)
 
-    Yanas = analytic_trajectory(X, Y, Xgt, Ygt, T=50, eta=eta)
-    Yimpls = implicit_trajectory(X, Y, Xgt, Ygt, T=50, eta=eta)
+    Yanas = analytic_trajectory(X, Y, Xgt, Ygt, T=T, eta=eta)
+    Yimpls = implicit_trajectory(X, Y, Xgt, Ygt, T=T, eta=eta)
     
     # compute eigenspectra
     eigspectra_impl = implicit_eigenspectra(X, Yimpls, Xgt, Ygt)
     eigvals,eigspectra = analytic_eigenspectra(X, Yanas, Xgt, Ygt)
     eiglim = (min((min(eig) for eig in eigvals)) - 0.1, max((max(eig) for eig in eigvals)) + 0.1)
 
+    fig = plt.figure(figsize=(20, 4))
+    gs = mpl.gridspec.GridSpec(1, 5, top=0.9, bottom=0.15, left=0.03, right=0.97,
+                               width_ratios=[1, 1, 0.1, 1, 1])
+    ax00 = plt.subplot(gs[0, 0])
+    plt.title('Explicit Gradient')
+    ax00.set_aspect('equal')
+    plt.xlabel('x')
+    plt.ylabel('y')
+    ax01 = plt.subplot(gs[0, 1])
+    plt.xlabel(r'$\lambda$')
+    plt.title('Explicit Eigenspectrum')
+    ax10 = plt.subplot(gs[0, 3])
+    ax10.set_aspect('equal')
+    plt.xlabel('x')
+    plt.ylabel('y')
+    plt.xlim((-1.5, 1.5))
+    plt.ylim((-1.5, 1.5))
+    plt.title('Implicit Gradient')
+    ax11 = plt.subplot(gs[0, 4])
+    plt.xlabel(r'$\lambda$')
+    plt.title('Implicit Eigenspectrum')
+
     for t,(Yana,eigval) in enumerate(zip(Yanas, eigvals)):
+        # alpha = 1.0 - t/T
+        alpha = 0.25
+
         # analytic
         zstar = analytic_fixed_point(X, Yana)
         xeval = jnp.array([[-1.5, 1.0],[1.5, 1.0]])
         yeval = xeval @ zstar
 
-        fig = plt.figure(figsize=(10, 10))
-        gs = mpl.gridspec.GridSpec(2, 2)
-
-        ax = plt.subplot(gs[0, 0])
-        plt.plot(X[:, 0], Yana, '.', label=r'Learned Data ($\theta$)')
-        plt.plot(xeval[:, 0], yeval, label=r'Best-Fit Line ($z^*(\theta)$)')
-        plt.plot(Xgt[:, 0], Ygt, '.', label=r'Test Data')
+        plt.sca(ax00)
+        kwargs = {'label': r'Learned Data ($\theta$)'} if t == 0 else {}
+        plt.plot(X[:, 0], Yana, '.', c='C0', alpha=alpha, **kwargs)
+        kwargs = {'label': r'Best-Fit Line ($z^*(\theta)$)'} if t == 0 else {}
+        plt.plot(xeval[:, 0], yeval, c='C1', alpha=alpha, **kwargs)
+        kwargs = {'label': r'Test Data'} if t == 0 else {}
+        plt.plot(Xgt[:, 0], Ygt, '.', c='C2', **kwargs)
         plt.xlim((-1.5, 1.5))
         plt.ylim((-1.5, 1.5))
-        ax.set_aspect('equal')
-        plt.legend(loc='upper left')
-        plt.title('Explicit Gradient')
 
-        ax = plt.subplot(gs[0, 1])
-        plt.plot(eigspectra[t][1], eigspectra[t][0], label='Lanczos Exact', alpha=0.4)
-        plt.hist(eigval, bins=jnp.linspace(eiglim[0], eiglim[1], 150), label='Exact')
+        plt.sca(ax01)
+        kwargs = {'label': 'Lanczos Explicit'} if t == 0 else {}
+        plt.plot(eigspectra[t][1].tolist() + [eigspectra[t][1][-1]], eigspectra[t][0].tolist() + [0.0], c='C0', alpha=alpha, **kwargs)
+        kwargs = {'label': 'Exact'} if t == 0 else {}
+        plt.hist(eigval, bins=jnp.linspace(eiglim[0], eiglim[1], 150), color='C1', alpha=alpha, **kwargs)
         plt.xlim(eiglim)
         plt.ylim((0.0, 3.2))
-        plt.title('Explicit Eigenspectrum')
-        plt.legend(loc='upper right')
 
         # implicit
         zstar = analytic_fixed_point(X, Yimpls[t])
         yeval = xeval @ zstar
 
-        ax = plt.subplot(gs[1, 0])
-        plt.plot(X[:, 0], Yimpls[t], '.', label=r'Learned Data ($\theta$)')
-        plt.plot(xeval[:, 0], yeval, label=r'Best-Fit Line ($z^*(\theta)$)')
-        plt.plot(Xgt[:, 0], Ygt, '.', label=r'Test Data')
-        plt.xlim((-1.5, 1.5))
-        plt.ylim((-1.5, 1.5))
-        ax.set_aspect('equal')
-        plt.legend(loc='upper left')
-        plt.title('Implicit Gradient')
+        plt.sca(ax10)
+        kwargs = {'label': r'Learned Data ($\theta$)'} if t == 0 else {}
+        plt.plot(X[:, 0], Yimpls[t], '.', c='C0', alpha=alpha, **kwargs)
+        kwargs = {'label': r'Best-Fit Line ($z^*(\theta)$)'} if t == 0 else {}
+        plt.plot(xeval[:, 0], yeval, c='C1', alpha=alpha, **kwargs)
+        kwargs = {'label': r'Test Data'} if t == 0 else {}
+        plt.plot(Xgt[:, 0], Ygt, '.', c='C2', **kwargs)
 
-        ax = plt.subplot(gs[1, 1])
-        plt.plot(eigspectra_impl[t][1], eigspectra_impl[t][0], label='Lanczos Implicit', alpha=0.4)
+        plt.sca(ax11)
+        kwargs = {'label': 'Lanczos Implicit'} if t == 0 else {}
+        plt.plot(eigspectra_impl[t][1].tolist() + [eigspectra[t][1][-1]], eigspectra_impl[t][0].tolist() + [0.0], c='C0', alpha=alpha, **kwargs)
         plt.xlim(eiglim)
         plt.ylim((0.0, 3.2))
-        plt.title('Implicit Eigenspectrum')
-        plt.legend(loc='upper right')
 
-        imname = f'silly{t:03}.jpg'
-        print('saving', imname)
-        plt.savefig(imname)
-        plt.close(fig)
+    plt.sca(ax00)
+    plt.legend(loc='upper left')
+    plt.sca(ax01)
+    plt.legend(loc='upper right')
+    plt.sca(ax10)
+    plt.legend(loc='upper left')
+    plt.sca(ax11)
+    plt.legend(loc='upper right')
+
+    imname = 'linreg.pdf'
+    print('saving', imname)
+    plt.savefig(imname)
+    plt.close(fig)
 

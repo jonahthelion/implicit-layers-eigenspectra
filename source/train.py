@@ -39,7 +39,9 @@ def net_fn(batch) -> jnp.ndarray:
         hk.Linear(10),
     ])
     middle = hk.Linear(10, with_bias=False)
-    last_layer = hk.Linear(10)
+    last_layer = hk.Sequential([
+        hk.Linear(10)
+    ])
     # this ensures that if the hidden size is the same, deq weights = mlp weights
     x = first_layer(x)
     transformed_net = hk.transform(middle)
@@ -154,12 +156,12 @@ def train_core(net, saveprefix):
         avg_params = ema_update(params, avg_params)
 
 
-def eval_model(mpath, is_deq=False):
+def eval_model(mpath, is_deq=False, hidden_size=10):
     """Check that we can re-load a model and get the same
     training and test accuracy
     """
     print('is testing deq model:', is_deq)
-    net = hk.transform(net_fn) if not is_deq else hk.transform(lambda x: full_deq_fn(x, 'analytic', hidden_size=10, max_steps=10))
+    net = hk.transform(net_fn) if not is_deq else hk.transform(lambda x: full_deq_fn(x, 'analytic', hidden_size=hidden_size, max_steps=None))
 
     # Evaluation metric (classification accuracy).
     @jax.jit
@@ -214,7 +216,7 @@ def eval_mlp_spectrum(mfolder='./storage/mnist'):
         pickle.dump({'density': density, 'grids': grids}, open(outname, "wb" ))
 
 
-def eval_deq_spectrum(deq_init, mfolder='./storage/mnist', rnd_seed=42, hidden_size=10, max_steps=10):
+def eval_deq_spectrum(deq_init, use_analytic, mfolder='./storage/mnist', rnd_seed=42, hidden_size=10, max_steps=10):
     net = hk.transform(lambda x,kind,z=None: full_deq_fn(x, kind, hidden_size, max_steps, z))
 
     train_eval = load_dataset("train", is_training=False, batch_size=60000)
@@ -234,23 +236,27 @@ def eval_deq_spectrum(deq_init, mfolder='./storage/mnist', rnd_seed=42, hidden_s
 
         flat_params, unravel = ravel_pytree(avg_params)
 
-        # # hvp function (analytic)
-        # ana_f = lambda params,x: net.apply(params, jax.random.PRNGKey(rnd_seed), x, 'analytic')
-        # loss_f = lambda x: loss_function(None, batch, None, x)
-        # hvp = jax.jit(lambda v: jax.jvp(lambda p: jax.grad(lambda params: loss_f(ana_f(params, batch)))(p), [avg_params], [v])[1])
-        # hvp_cl = lambda v: ravel_pytree(hvp(unravel(v)))[0]
+        # hvp function (analytic, only valid if deq inner layer is linear)
+        if use_analytic:
+            print('using analytic hvp (assumes linear DEQ)')
+            ana_f = lambda params,x: net.apply(params, jax.random.PRNGKey(rnd_seed), x, 'analytic')
+            loss_f = lambda x: loss_function(None, batch, None, x)
+            hvp = jax.jit(lambda v: jax.jvp(lambda p: jax.grad(lambda params: loss_f(ana_f(params, batch)))(p), [avg_params], [v])[1])
+            hvp_cl = lambda v: ravel_pytree(hvp(unravel(v)))[0]
 
         # hvp function (implicit)
-        prepro_f = lambda params,x: net.apply(params, None, x, 'prepro')
-        postpro_f = lambda params,x: net.apply(params, None, x, 'postpro')
-        zstar_f = lambda params,x: net.apply(params, jax.random.PRNGKey(rnd_seed), x, 'zstar')
-        final_loss_f = lambda params,z: loss_function(None, batch, None, postpro_f(params, z))
-        f_f = lambda params,x,z: net.apply(params, jax.random.PRNGKey(rnd_seed), x, 'f', z)
-        x0 = prepro_f(avg_params, batch)
-        zstar = zstar_f(avg_params, x0)
-        hvpours = jax.jit(lambda v: our_hvp(lambda z,p: our_gradient(final_loss_f, f_f, z, prepro_f(p, batch), prepro_f, batch, p),
-                    f_f, prepro_f, zstar, avg_params, x0, batch, queryv=v))
-        hvp_cl = lambda v: ravel_pytree(hvpours(unravel(v)))[0]
+        else:
+            print('using implicit hvp')
+            prepro_f = lambda params,x: net.apply(params, None, x, 'prepro')
+            postpro_f = lambda params,x: net.apply(params, None, x, 'postpro')
+            zstar_f = lambda params,x: net.apply(params, jax.random.PRNGKey(rnd_seed), x, 'zstar')
+            final_loss_f = lambda params,z: loss_function(None, batch, None, postpro_f(params, z))
+            f_f = lambda params,x,z: net.apply(params, jax.random.PRNGKey(rnd_seed), x, 'f', z)
+            x0 = prepro_f(avg_params, batch)
+            zstar = zstar_f(avg_params, x0)
+            hvpours = jax.jit(lambda v: our_hvp(lambda z,p: our_gradient(final_loss_f, f_f, z, prepro_f(p, batch), prepro_f, batch, p),
+                        f_f, prepro_f, zstar, avg_params, x0, batch, queryv=v))
+            hvp_cl = lambda v: ravel_pytree(hvpours(unravel(v)))[0]
 
         print('running hvp')
         tridiag, vecs = lanczos.lanczos_alg(hvp_cl, flat_params.shape[0], order=90, rng_key=jaxrnd.PRNGKey(0))
@@ -264,17 +270,17 @@ def eval_deq_spectrum(deq_init, mfolder='./storage/mnist', rnd_seed=42, hidden_s
 def plot_mlp_spectrum(mfolder='./storage/mnist', imname='mlpmnist.png'):
     fs = sorted(glob(os.path.join(mfolder, 'specmlp*.pkl')))
     print(fs)
-    plot_spectrum_core(fs, imname, 'Deep Linear Hessian Eigenspectra (MNIST)')
+    plot_spectrum_core(fs, imname, 'MLP Hessian Eigenspectra (MNIST)')
 
 
 def plot_deq_spectrum(deq_init, mfolder='./storage/mnist'):
     if deq_init:
         fs = sorted(glob(os.path.join(mfolder, 'specdeqinit*.pkl')))
-        title = 'Deep Linear DEQ Hessian Eigenspectra (Function Init) (MNIST)'
+        title = 'DEQ Hessian Eigenspectra (Function Init) (MNIST)'
         imname = 'deqinitmnist.png'
     else:
         fs = sorted(glob(os.path.join(mfolder, 'specdeq0*.pkl')))
-        title = 'Deep Linear DEQ Hessian Eigenspectra (Parameter Init) (MNIST)'
+        title = 'DEQ Hessian Eigenspectra (Parameter Init) (MNIST)'
         imname = 'deqmnist.png'
     print(fs)
     plot_spectrum_core(fs, imname, title)
@@ -323,6 +329,71 @@ def plot_spectrum_core(fs, imname, plottitle):
     gs.update(hspace=-0.5)
 
     # plt.tight_layout()
+    print('saving', imname)
+    plt.savefig(imname)
+    plt.close(fig)
+
+
+def quick_training_plot():
+    mlp_curve = onp.array([[0, 0.128, 0.134],
+    [13, 0.130, 0.135],
+    [109, 0.219, 0.229],
+    [370, 0.440, 0.428],
+    [877, 0.744, 0.740],
+    [1714, 0.923, 0.915],
+    [2962, 0.956, 0.946],
+    [4705, 0.967, 0.953],
+    [7023, 0.975, 0.954],
+    [10000, 0.981, 0.952],
+    ])
+
+    deq_curve = onp.array([
+        [0, 0.107, 0.107],
+        [13, 0.108, 0.107],
+        [109, 0.130, 0.127],
+        [370, 0.431, 0.431],
+        [877, 0.825, 0.827],
+        [1714, 0.925, 0.924],
+        [2962, 0.959, 0.947],
+        [4705, 0.971, 0.951],
+        [7023, 0.978, 0.951],
+        [10000, 0.983, 0.951],
+    ])
+
+    deq_init_curve = onp.array([
+        [0, 0.116, 0.112],
+        [13, 0.116, 0.134],
+        [109, 0.113, 0.109],
+        [370, 0.108, 0.359],
+        [877, 0.333, 0.547],
+        [1714, 0.809, 0.756],
+        [2962, 0.907, 0.899],
+        [4705, 0.931, 0.924],
+        [7023, 0.942, 0.933],
+        [10000, 0.951, 0.940],
+    ])
+
+    fig = plt.figure(figsize=(10, 3))
+    gs = mpl.gridspec.GridSpec(1, 2, top=0.9, bottom=0.16, left=0.05, right=0.95)
+    ax = plt.subplot(gs[0, 0])
+    plt.plot(mlp_curve[:, 0], mlp_curve[:, 1], label='MLP')
+    plt.plot(deq_curve[:, 0], deq_curve[:, 1], label='DEQ (parameter init)')
+    plt.plot(deq_init_curve[:, 0], deq_init_curve[:, 1], label='DEQ (function init)')
+    plt.legend()
+    plt.ylim((0.0, 1.0))
+    plt.title('Train Accuracy')
+    plt.xlabel('Steps')
+
+    ax = plt.subplot(gs[0, 1])
+    plt.plot(mlp_curve[:, 0], mlp_curve[:, 2], label='MLP')
+    plt.plot(deq_curve[:, 0], deq_curve[:, 2], label='DEQ (parameter init)')
+    plt.plot(deq_init_curve[:, 0], deq_init_curve[:, 2], label='DEQ (function init)')
+    plt.legend()
+    plt.ylim((0.0, 1.0))
+    plt.title('Test Accuracy')
+    plt.xlabel('Steps')
+
+    imname = 'mnisttraining.pdf'
     print('saving', imname)
     plt.savefig(imname)
     plt.close(fig)

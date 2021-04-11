@@ -16,6 +16,7 @@ if __name__ == "__main__":
         'eval_deq_spectrum': source.train.eval_deq_spectrum,
         'plot_mlp_spectrum': source.train.plot_mlp_spectrum,
         'plot_deq_spectrum': source.train.plot_deq_spectrum,
+        'quick_training_plot': source.train.quick_training_plot,
 
         'linear_regression': source.toy.linear_regression,
         'check_deq': source.sanity_check.check_deq,
